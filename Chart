@@ -1,40 +1,370 @@
-ytes(fig):
+#!/usr/bin/env python3
+"""
+Credit Card Decline Dashboard Generator
+Usage: python decline_dashboard.py [your_file.xlsx]
+"""
+
+import sys, io, warnings
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use('Agg')
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
+from reportlab.lib.pagesizes import A3, landscape
+from reportlab.platypus import SimpleDocTemplate, Image as RLImage, PageBreak
+from reportlab.lib.units import inch
+warnings.filterwarnings('ignore')
+
+# ── Constants ────────────────────────────────────────────────
+MONTHS = ['Jan25','Feb25','Mar25','Apr25','May25','Jun25',
+          'Jul25','Aug25','Sep25','Oct25','Nov25','Dec25']
+
+COLORS = {
+    'approved': '#4CAF50', 'declined': '#F44336',
+    'credit':   '#1565C0', 'falcon':   '#FF8F00',
+    'other':    '#00897B', 'stip':     '#8E24AA',
+    'cp':       '#7986CB', 'cnp':      '#29B6F6',
+    'nonstip':  '#FF8F00',
+}
+CARD_COLORS = ['#E53935','#1E88E5','#FDD835','#FB8C00','#8E24AA','#F48FB1','#00BCD4','#795548']
+CAT_COLORS  = [COLORS['credit'], COLORS['falcon'], COLORS['other'], COLORS['stip']]
+CATS        = ['Credit Related Decline','Falcon Decline','Other Decline','STIP Decline']
+
+# ── Load & Clean Data ────────────────────────────────────────
+def load(path):
+    df = pd.read_excel(path, sheet_name=0)
+    df.columns = [c.strip() for c in df.columns]
+
+    # Normalise month: "Dec-25" or "Dec25" → "Dec25"
+    df['month'] = df['month'].astype(str).str.replace(r'[-\s]','',regex=True)
+
+    df['is_approved'] = df['decisioning'].str.contains('Approved', case=False, na=False)
+    df['is_declined'] = df['decisioning'].str.contains('Declined', case=False, na=False)
+
+    def cat(row):
+        t = str(row.get('tag','')).upper()
+        if 'FALCON' in t: return 'Falcon Decline'
+        if 'STIP'   in t: return 'STIP Decline'
+        if any(k in t for k in ['INSUFF','CASH_LINE','CREDIT_LINE']): return 'Credit Related Decline'
+        return 'Other Decline'
+
+    df['cat']      = df.apply(lambda r: cat(r) if r['is_declined'] else None, axis=1)
+    df['is_stip']  = df['tag'].astype(str).str.upper().str.contains('STIP', na=False)
+    df['cp_cnp']   = df['CP_CNP'].astype(str).str.strip().str.upper()
+    df['cardtype'] = df['cardtype'].astype(str).str.strip().str.upper()
+
+    avail = df['month'].unique()
+    global MONTHS
+    MONTHS = [m for m in MONTHS if m in avail] or sorted(avail)
+    return df
+
+# ── Aggregations ─────────────────────────────────────────────
+def agg_monthly(df):
+    rows = []
+    for m in MONTHS:
+        s = df[df['month']==m]
+        an = s[s['is_approved']]['txns'].sum()
+        dn = s[s['is_declined']]['txns'].sum()
+        as_ = s[s['is_approved']]['amt_usd'].sum()
+        ds  = s[s['is_declined']]['amt_usd'].sum()
+        rows.append(dict(month=m, an=an, dn=dn, tn=an+dn,
+                         as_=as_, ds=ds, ts=as_+ds))
+    mt = pd.DataFrame(rows)
+    mt['dr_n'] = mt['dn']/mt['tn']
+    mt['dr_s'] = mt['ds']/mt['ts']
+    return mt
+
+def agg_cat(df, mt):
+    rows = []
+    for m in MONTHS:
+        s  = df[(df['month']==m) & df['is_declined']]
+        tn = mt.loc[mt['month']==m,'tn'].values[0]
+        ts = mt.loc[mt['month']==m,'ts'].values[0]
+        for cat in CATS:
+            c = s[s['cat']==cat]
+            rows.append(dict(month=m, cat=cat,
+                             n=c['txns'].sum(), s=c['amt_usd'].sum(),
+                             tn=tn, ts=ts,
+                             dn=s['txns'].sum(), ds=s['amt_usd'].sum()))
+    return pd.DataFrame(rows)
+
+# ── Chart Utilities ───────────────────────────────────────────
+def fig2buf(fig):
     buf = io.BytesIO()
     fig.savefig(buf, format='png', dpi=150, bbox_inches='tight')
-    plt.close(fig)
-    buf.seek(0)
+    plt.close(fig); buf.seek(0)
     return buf
 
-# ─────────────────────────────────────────────────────────────
-# PAGE 1 – Overview: #Txn & # Decline Rate / $ Decline Rate
-# ─────────────────────────────────────────────────────────────
+def style(ax, ylabel='', pct=False):
+    ax.set_xticks(range(len(MONTHS)))
+    ax.set_xticklabels(MONTHS, fontsize=5.5, rotation=45, ha='right')
+    ax.tick_params(axis='y', labelsize=5.5)
+    ax.set_ylabel(ylabel, fontsize=5.5)
+    if pct: ax.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=100))
+    ax.spines[['top','right']].set_visible(False)
+    ax.grid(axis='y', alpha=0.2, lw=0.5)
+    ax.set_facecolor('#F8F9FA')
 
-def page1_overview(mt):
-    months = mt['month'].tolist()
-    x = range(len(months))
+def label_stacked(ax, x, bottom, vals, thr=4, fs=4):
+    for xi,(b,v) in enumerate(zip(bottom,vals)):
+        if v > thr:
+            ax.text(xi, b+v/2, f'{v:.1f}%', ha='center', va='center',
+                    fontsize=fs, color='white', fontweight='bold')
 
-    fig, axes = plt.subplots(2, 2, figsize=(20, 10))
-    fig.suptitle('Credit Card Decline Dashboard – Overview', fontsize=11, fontweight='bold')
+def stacked_bar(ax, x, series, colors, labels):
+    bot = np.zeros(len(MONTHS))
+    for vals, color, label in zip(series, colors, labels):
+        vals = np.array(vals)
+        ax.bar(x, vals, bottom=bot, color=color, label=label, width=0.7, zorder=3)
+        label_stacked(ax, x, bot, vals)
+        bot += vals
 
-    # ── Top-left: # Transaction & # Decline Rate ──
-    ax = axes[0, 0]
-    ax.set_title('#Transaction & #Decline Rate', fontsize=8, fontweight='bold')
-    b1 = ax.bar(x, mt['approved_n'], color=COLORS['approved'], label='Approved')
-    b2 = ax.bar(x, mt['declined_n'], bottom=mt['approved_n'],
-                color=COLORS['declined'], label='Declined')
-    ax2 = ax.twinx()
-    ax2.plot(x, mt['decline_rate_n'], color='red', marker='o', markersize=3, linewidth=1.5)
-    for xi, yi in zip(x, mt['decline_rate_n']):
-        ax2.text(xi, yi+0.001, f'{yi*100:.1f}%', ha='center', fontsize=5, color='red')
-    ax2.yaxis.set_major_formatter(mticker.PercentFormatter(xmax=1, decimals=0))
-    ax2.tick_params(labelsize=6)
-    # value labels inside bars
-    for xi, (an, dn) in enumerate(zip(mt['approved_n'], mt['declined_n'])):
-        ax.text(xi, an/2,      fmt_k(an), ha='center', va='center', fontsize=4, color='white')
-        ax.text(xi, an+dn/2,   fmt_k(dn), ha='center', va='center', fontsize=4, color='white')
-    style_ax(ax, months, '#Transactions')
-    ax.legend(fontsize=6, loc='upper left')
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: fmt_k(v)))
+# ── Pages ─────────────────────────────────────────────────────
+def page_overview(mt):
+    fig, axes = plt.subplots(2, 2, figsize=(22,11))
+    fig.suptitle('Credit Card Decline Dashboard – Overview', fontsize=12, fontweight='bold')
+    x = range(len(MONTHS))
+
+    for col,(n_col,d_col,t_col,dr_col,ylbl) in enumerate([
+        ('an','dn','tn','dr_n','# Transactions'),
+        ('as_','ds','ts','dr_s','$ Amount (USD)'),
+    ]):
+        ax = axes[0, col]
+        title = ['#Transaction & #Decline Rate','$Transaction & $Decline Rate'][col]
+        ax.set_title(title, fontsize=8, fontweight='bold')
+        approved = mt[n_col if col==0 else 'as_'] / (1e3 if col==0 else 1e6)
+        declined = mt[d_col if col==0 else 'ds']  / (1e3 if col==0 else 1e6)
+        ax.bar(x, approved, color=COLORS['approved'], label='Approved', zorder=3)
+        ax.bar(x, declined, bottom=approved, color=COLORS['declined'], label='Declined', zorder=3)
+        ax2 = ax.twinx()
+        dr = mt[dr_col]*100
+        ax2.plot(x, dr, 'r-o', ms=3, lw=1.5, zorder=4)
+        for xi,v in enumerate(dr): ax2.text(xi, v+0.1, f'{v:.1f}%', ha='center', fontsize=4, color='red')
+        ax2.tick_params(labelsize=5); ax2.set_ylabel('Decline %', fontsize=5, color='red')
+        fmt = (lambda v,_: f'{v:.0f}K') if col==0 else (lambda v,_: f'${v:.0f}M')
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(fmt))
+        style(ax, ylbl); ax.legend(fontsize=5)
+
+    for col in range(2):
+        ax = axes[1, col]
+        dr = (mt['dr_n'] if col==0 else mt['dr_s'])*100
+        ar = 100 - dr
+        title = ['Monthly Rate (#) – By Decision','Monthly Rate ($) – By Decision'][col]
+        ax.set_title(title, fontsize=8, fontweight='bold')
+        ax.bar(x, ar, color=COLORS['approved'], label='Approved', zorder=3)
+        ax.bar(x, dr, bottom=ar, color=COLORS['declined'], label='Declined', zorder=3)
+        for xi,(a,d) in enumerate(zip(ar,dr)):
+            ax.text(xi, a/2,   f'{a:.2f}%', ha='center', va='center', fontsize=4.5, color='white', fontweight='bold')
+            ax.text(xi, a+d/2, f'{d:.2f}%', ha='center', va='center', fontsize=4.5, color='white')
+        style(ax, 'Rate %'); ax.set_ylim(0,105); ax.legend(fontsize=5)
+
+    fig.tight_layout()
+    return fig2buf(fig)
+
+def page_by_type(df_cat):
+    fig, axes = plt.subplots(2, 2, figsize=(22,11))
+    fig.suptitle('Decline Rate & Waterfall – By Decline Type', fontsize=12, fontweight='bold')
+    x = range(len(MONTHS))
+
+    for col,(num,denom,sfx) in enumerate([('n','tn','#'),('s','ts','$')]):
+        # Line chart
+        ax = axes[0, col]
+        ax.set_title(f'{sfx} Decline Rate – By Decline Type', fontsize=8, fontweight='bold')
+        for cat,color in zip(CATS, CAT_COLORS):
+            vals = [df_cat[(df_cat['month']==m)&(df_cat['cat']==cat)][num].values[0] /
+                    max(df_cat[(df_cat['month']==m)&(df_cat['cat']==cat)][denom].values[0],1)*100
+                    for m in MONTHS]
+            ax.plot(x, vals, color=color, marker='o', ms=3, lw=1.5, label=cat.replace(' Decline',''))
+            for xi,v in enumerate(vals):
+                if v>0.01: ax.text(xi, v+0.03, f'{v:.2f}%', ha='center', fontsize=3.8, color=color)
+        style(ax, '% of Total'); ax.legend(fontsize=5, ncol=2)
+
+        # Waterfall
+        ax = axes[1, col]
+        ax.set_title(f'{sfx} Decline Waterfall Distribution', fontsize=8, fontweight='bold')
+        bot = np.zeros(len(MONTHS))
+        for cat,color in zip(CATS, CAT_COLORS):
+            vals = np.array([
+                df_cat[(df_cat['month']==m)&(df_cat['cat']==cat)][num].values[0] /
+                max(df_cat[df_cat['month']==m][num].sum(),1)*100
+                for m in MONTHS])
+            ax.bar(x, vals, bottom=bot, color=color, label=cat.replace(' Decline',''), width=0.7, zorder=3)
+            label_stacked(ax, x, bot, vals)
+            bot += vals
+        style(ax, '% of Declines'); ax.set_ylim(0,108); ax.legend(fontsize=5, ncol=2)
+
+    fig.tight_layout()
+    return fig2buf(fig)
+
+def page_by_card(df):
+    cards = sorted(df['cardtype'].dropna().unique())
+    colors = CARD_COLORS[:len(cards)]
+    fig, axes = plt.subplots(2, 2, figsize=(22,11))
+    fig.suptitle('# and $ Distribution & Decline Rate – By Card Type', fontsize=12, fontweight='bold')
+    x = range(len(MONTHS))
+
+    for col,(metric,sfx) in enumerate([('txns','#'),('amt_usd','$')]):
+        # Distribution
+        ax = axes[0, col]
+        ax.set_title(f'{sfx} Distribution – By Card Type', fontsize=8, fontweight='bold')
+        bot = np.zeros(len(MONTHS))
+        for card,color in zip(cards, colors):
+            vals = np.array([
+                df[(df['month']==m)&(df['cardtype']==card)][metric].sum() /
+                max(df[df['month']==m][metric].sum(),1)*100 for m in MONTHS])
+            ax.bar(x, vals, bottom=bot, color=color, label=card, width=0.7, zorder=3)
+            label_stacked(ax, x, bot, vals, thr=5)
+            bot += vals
+        style(ax, '% of Total'); ax.set_ylim(0,108); ax.legend(fontsize=4.5, ncol=3)
+
+        # Decline rate
+        ax = axes[1, col]
+        ax.set_title(f'{sfx} Decline Rate – By Card Type', fontsize=8, fontweight='bold')
+        for card,color in zip(cards, colors):
+            vals = []
+            for m in MONTHS:
+                s = df[(df['month']==m)&(df['cardtype']==card)]
+                t = s[metric].sum()
+                d = s[s['is_declined']][metric].sum()
+                vals.append(d/t*100 if t else 0)
+            ax.plot(x, vals, color=color, marker='o', ms=2.5, lw=1.2, label=card)
+        style(ax, f'{sfx} Decline Rate %'); ax.legend(fontsize=4.5, ncol=2)
+
+    fig.tight_layout()
+    return fig2buf(fig)
+
+def page_stip_cp(df):
+    fig, axes = plt.subplots(2, 2, figsize=(22,11))
+    fig.suptitle('STIP vs Non-STIP  |  Card Present vs Card Not Present', fontsize=12, fontweight='bold')
+    x = range(len(MONTHS))
+
+    # STIP distribution
+    ax = axes[0,0]
+    ax.set_title('Monthly Rate (#) – By STIP/Non-STIP', fontsize=8, fontweight='bold')
+    stip_pct, nstip_pct = [], []
+    for m in MONTHS:
+        s = df[df['month']==m]; t = s['txns'].sum()
+        sp = s[s['is_stip']]['txns'].sum()/t*100 if t else 0
+        stip_pct.append(sp); nstip_pct.append(100-sp)
+    stacked_bar(ax, x, [nstip_pct, stip_pct], [COLORS['nonstip'],'#1565C0'], ['Non-STIP','STIP'])
+    style(ax, '% of Transactions'); ax.set_ylim(0,105); ax.legend(fontsize=6)
+
+    # STIP decline rate
+    ax = axes[0,1]
+    ax.set_title('Decline Rate (#) – By STIP/Non-STIP', fontsize=8, fontweight='bold')
+    for flag,color,label in [(True,'#1565C0','STIP'),(False,COLORS['nonstip'],'Non-STIP')]:
+        vals = []
+        for m in MONTHS:
+            s = df[(df['month']==m)&(df['is_stip']==flag)]
+            t = s['txns'].sum(); d = s[s['is_declined']]['txns'].sum()
+            vals.append(d/t*100 if t else 0)
+        ax.plot(x, vals, color=color, marker='o', ms=3, lw=1.5, label=label)
+        for xi,v in enumerate(vals): ax.text(xi, v+0.5, f'{v:.2f}%', ha='center', fontsize=4, color=color)
+    style(ax, 'Decline Rate %'); ax.legend(fontsize=6)
+
+    # CP/CNP distribution
+    ax = axes[1,0]
+    ax.set_title('Monthly Rate (#) – By CP/CNP', fontsize=8, fontweight='bold')
+    cp_pct, cnp_pct = [], []
+    for m in MONTHS:
+        s = df[df['month']==m]; t = s['txns'].sum()
+        cp = s[s['cp_cnp']=='CP']['txns'].sum()/t*100 if t else 0
+        cp_pct.append(cp); cnp_pct.append(100-cp)
+    stacked_bar(ax, x, [cp_pct, cnp_pct], [COLORS['cp'], COLORS['cnp']], ['CP','CNP'])
+    style(ax, '% of Transactions'); ax.set_ylim(0,105); ax.legend(fontsize=6)
+
+    # CP/CNP decline rate
+    ax = axes[1,1]
+    ax.set_title('Decline Rate (#) – By CP/CNP', fontsize=8, fontweight='bold')
+    for flag,color,label in [('CP',COLORS['cp'],'CP'),('CNP',COLORS['cnp'],'CNP')]:
+        vals = []
+        for m in MONTHS:
+            s = df[(df['month']==m)&(df['cp_cnp']==flag)]
+            t = s['txns'].sum(); d = s[s['is_declined']]['txns'].sum()
+            vals.append(d/t*100 if t else 0)
+        ax.plot(x, vals, color=color, marker='o', ms=3, lw=1.5, label=label)
+        for xi,v in enumerate(vals): ax.text(xi, v+0.1, f'{v:.2f}%', ha='center', fontsize=4, color=color)
+    style(ax, 'Decline Rate %'); ax.legend(fontsize=6)
+
+    fig.tight_layout()
+    return fig2buf(fig)
+
+def page_tables(df, mt):
+    fig, axes = plt.subplots(3, 1, figsize=(22,12))
+    fig.suptitle('Monthly Summary Tables', fontsize=12, fontweight='bold')
+
+    def draw_table(ax, rows, row_labels, title, hdr_color='#1565C0'):
+        ax.axis('off')
+        ax.set_title(title, fontsize=8, fontweight='bold', loc='left', pad=5)
+        tbl = ax.table(cellText=rows, colLabels=MONTHS, rowLabels=row_labels,
+                       loc='center', cellLoc='center')
+        tbl.auto_set_font_size(False); tbl.set_fontsize(6); tbl.scale(1, 1.6)
+        for (r,c),cell in tbl.get_celld().items():
+            cell.set_edgecolor('#CCCCCC')
+            if r==0: cell.set_facecolor(hdr_color); cell.set_text_props(color='white', fontweight='bold')
+            elif c==-1: cell.set_facecolor('#E3F2FD'); cell.set_text_props(fontweight='bold')
+            elif r%2==0: cell.set_facecolor('#F5F5F5')
+
+    fk = lambda v: f'{v/1000:.2f}K'
+    fm = lambda v: f'${v/1e6:.2f}M'
+
+    draw_table(axes[0],
+        [[fk(mt.loc[mt['month']==m,'an'].values[0]) for m in MONTHS],
+         [fk(mt.loc[mt['month']==m,'dn'].values[0]) for m in MONTHS],
+         [fk(mt.loc[mt['month']==m,'tn'].values[0]) for m in MONTHS],
+         [f"{mt.loc[mt['month']==m,'dr_n'].values[0]*100:.2f}%" for m in MONTHS]],
+        ['Approved','Declined','Grand Total','Decline Rate'], '# Transaction Summary')
+
+    draw_table(axes[1],
+        [[fm(mt.loc[mt['month']==m,'as_'].values[0]) for m in MONTHS],
+         [fm(mt.loc[mt['month']==m,'ds'].values[0]) for m in MONTHS],
+         [fm(mt.loc[mt['month']==m,'ts'].values[0]) for m in MONTHS],
+         [f"{mt.loc[mt['month']==m,'dr_s'].values[0]*100:.2f}%" for m in MONTHS]],
+        ['Approved','Declined','Grand Total','Decline Rate'], '$ Amount Summary (USD)', '#2E7D32')
+
+    cat_rows = []
+    for cat in CATS:
+        cat_rows.append([fk(df[(df['month']==m)&(df['cat']==cat)]['txns'].sum()) for m in MONTHS])
+    cat_rows.append([fk(mt.loc[mt['month']==m,'dn'].values[0]) for m in MONTHS])
+    draw_table(axes[2], cat_rows,
+        [c.replace(' Decline','') for c in CATS]+['Total #'],
+        '# Decline Count – By Category', '#6A1B9A')
+
+    fig.tight_layout()
+    return fig2buf(fig)
+
+# ── Main ─────────────────────────────────────────────────────
+def main():
+    path = sys.argv[1] if len(sys.argv)>1 else 'AE_Auth_Decline_Summary.xlsx'
+    print(f'Loading: {path}')
+    df = load(path)
+    mt = agg_monthly(df)
+    dc = agg_cat(df, mt)
+
+    print('Building charts...')
+    pages = [
+        page_overview(mt),
+        page_by_type(dc),
+        page_by_card(df),
+        page_stip_cp(df),
+        page_tables(df, mt),
+    ]
+
+    out = 'Credit_Card_Decline_Dashboard.pdf'
+    doc = SimpleDocTemplate(out, pagesize=landscape(A3),
+          leftMargin=0.3*inch, rightMargin=0.3*inch,
+          topMargin=0.3*inch,  bottomMargin=0.3*inch)
+    pw = landscape(A3)[0] - 0.6*inch
+    story = []
+    for i,buf in enumerate(pages):
+        story.append(RLImage(buf, width=pw, height=pw*0.56))
+        if i < len(pages)-1: story.append(PageBreak())
+    doc.build(story)
+    print(f'✅  Saved → {out}')
+
+if __name__ == '__main__':
+    main()    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v,_: fmt_k(v)))
 
     # ── Top-right: $ Transaction & $ Decline Rate ──
     ax = axes[0, 1]
