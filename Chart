@@ -1,478 +1,361 @@
+"""AE Auth Decline – Compact PDF Generator"""
 import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib.gridspec as gridspec
 from matplotlib.backends.backend_pdf import PdfPages
-from charts import *
-import matplotlib.pyplot as plt
-#from Tablefunction import plot_table
-#load & prepare data
-def load_data(excel_path,sheet_name):
-    df=pd.read_excel(excel_path,sheet_name)
-    df.columns.str.strip().str.lower()
-    df['month']=pd.to_datetime(df['month'],format='%b-%y')
-    df['month']=pd.to_datetime(df['month'])
-    df=df[df['month'].dt.year==2025]#year-2025
+from charts import plot_bar, plot_line, plot_table, plot_bar_line, plot_decline_rate_line, plot_decline_waterfall_bar
+
+EXCEL_PATH = "/home/claude/AE_Auth_Decline_Summary.xlsx"
+PDF_PATH   = "/home/claude/AE_Auth_Decline_Summary_data.pdf"
+SHEET      = "Auth Decline Summary"
+YEAR       = 2025
+EXCLUDE    = ["TITANIUM","TITANIUM2","WORLD"]
+CRD_TYPES  = ["Insuff_Decline","Cash_Line","Credit_Line"]
+WF_FILTER  = "Credit Related Decline|STIP_DECLINE|_Other declines|FALCON_DECLINE"
+RENAME     = {"Credit Related Decline":"Credit Related Decline","FALCON_DECLINE":"Falcon Decline",
+              "_Other declines":"Other Decline","STIP_DECLINE":"STIP Decline"}
+CARDS      = ["PLATINUM","INFINITE","CASHBACK","MNH REWARDS PLUS","SAADIQ","X CASHBACK"]
+
+# ── Data load ──────────────────────────────────────────────────────────────────
+def load(path, sheet):
+    df = pd.read_excel(path, sheet_name=sheet)
+    df.columns = df.columns.str.strip()
+    df["month"] = pd.to_datetime(df["month"], format="%b-%y")
+    df = df[df["month"].dt.year == YEAR].copy()
+    for c in ["decisioning","tag","type","cardtype","CP_CNP","network"]:
+        if c in df.columns: df[c] = df[c].astype(str).str.strip()
     return df
-#approved vs declined
-def approved_declined_kpi(df):
-    kpi=df.groupby(['month','decisioning'])['txns'].sum().unstack(fill_value=0)
-    kpi['Total']=kpi.sum(axis=1)
-    kpi_pct=kpi.div(kpi['Total'],axis=0)*100
-    return kpi_pct
-def approved_declined_kpi_usd(df):
-    kpi_usd=df.groupby(['month','decisioning'])['amt_usd'].sum().unstack(fill_value=0)
-    kpi_usd['Total']=kpi_usd.sum(axis=1)
-    kpi_pct_usd=kpi_usd.div(kpi_usd['Total'],axis=0)*100
-    return kpi_pct_usd
-#cp vs cnp
-def cp_cnp_kpi(df):
-    cp_cnp=df.groupby(['month','CP_CNP'])['txns'].sum().unstack(fill_value=0)
-    cp_cnp['Total']=cp_cnp.sum(axis=1)
-    cp_cnp_pct=cp_cnp.div(cp_cnp['Total'],axis=0)*100
-    return cp_cnp_pct
-def cp_cnp_kpi_usd(df):
-    cp_cnp_usd=df.groupby(['month','CP_CNP'])['amt_usd'].sum().unstack(fill_value=0)
-    cp_cnp_usd['Total']=cp_cnp_usd.sum(axis=1)
-    cp_cnp_pct_usd=cp_cnp_usd.div(cp_cnp_usd['Total'],axis=0)*100
-    return cp_cnp_pct_usd
-#percentage
-def to_percentage(df):
-    df=df.fillna(0)
-    if df.empty or df.sum().sum()==0:
-        return df
-    return (df.div(df.sum(axis=1),axis=0)*100).round(2)
-def convert_to_k(df):
-    return df.where(df < 1000, df/1000)
-def convert_to_m(df):
-    return df.where(df < 1000000, df/1000000)
-#decline Reasons
-def decline_reason_kpi(df):
-    declines=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    reason=declines.groupby(['month','network'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(reason)
-def decline_reason_kpi_usd(df):
-    declines_usd=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    reason_usd=declines_usd.groupby(['month','network'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(reason_usd)
-#STIP vs Non STIP decline
-def stip_trend_kpi(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    stip_decline=df.groupby(['month','tag'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(stip_decline)
-def stip_trend_kpi_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    stip_decline_usd=df.groupby(['month','tag'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(stip_decline_usd)
-#Card Type Decline
-def card_type_kpi(df):
-    #df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    df_filtered=df[~df['cardtype'].isin(['TITANIUM','TITANIUM2','WORLD'])]
-    card_type_decline=df_filtered.groupby(['month','cardtype'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline)
-def card_type_kpi_usd(df):
-    #df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    df_filtered=df[~df['cardtype'].isin(['TITANIUM','TITANIUM2','WORLD'])]
-    card_type_decline_usd=df_filtered.groupby(['month','cardtype'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_usd)
-#decline_card_type for CP
-def decline_card_type_kpi(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Cash_Line","Credit_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    cp_declines=df[df['CP_CNP']=='CP']
-    type_decline=cp_declines.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(type_decline)
-def decline_card_type_kpi_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    cp_declines=df[df['CP_CNP']=='CP']
-    type_decline_usd=cp_declines.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(type_decline_usd)
-#decline_card_type for CNP
-def decline_card_type_kpi_cnp(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    cp_declines=df[df['CP_CNP']=='CNP']
-    type_decline_cnp=cp_declines.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(type_decline_cnp)
-def decline_card_type_kpi_usd_cnp(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    cp_declines=df[df['CP_CNP']=='CNP']
-    type_decline_usd_cnp=cp_declines.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(type_decline_usd_cnp)
-def card_type_kpi_platinum(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='PLATINUM']
-    card_type_decline_platinum=df_filtered.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    #card_type_decline_platinum=convert_to_k(card_type_pct)
-    return to_percentage(card_type_decline_platinum)
-def card_type_kpi_platinum_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)] 
-    df_filtered=df[df['cardtype']=='PLATINUM']
-    card_type_decline_platinum_usd=df_filtered.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_platinum_usd)
-def card_type_kpi_infinite(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='INFINITE']
-    card_type_decline_infinite=df_filtered.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_infinite)
-def card_type_kpi_infinite_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='INFINITE']
-    card_type_decline_infinite_usd=df_filtered.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_infinite_usd)
-def card_type_kpi_cashback(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='CASHBACK']
-    card_type_decline_cashback=df_filtered.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_cashback)
-def card_type_kpi_cashback_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='CASHBACK']
-    card_type_decline_cashback_usd=df_filtered.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_cashback_usd)
-def card_type_kpi_MNH(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='MNH REWARDS PLUS']
-    card_type_decline_MNH=df_filtered.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_MNH)
-def card_type_kpi_MNH_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='MNH REWARDS PLUS']
-    card_type_decline_MNH_usd=df_filtered.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_MNH_usd)
-def card_type_kpi_saadiq(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='SAADIQ']
-    card_type_decline_saadiq=df_filtered.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_saadiq)
-def card_type_kpi_saadiq_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='SAADIQ']
-    card_type_decline_saadiq_usd=df_filtered.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_saadiq_usd)
-def card_type_kpi_xcashback(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='X CASHBACK']
-    card_type_decline_xcashback=df_filtered.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_xcashback)
-def card_type_kpi_xcashback_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    df_filtered=df[df['cardtype']=='X CASHBACK']
-    card_type_decline_xcashback_usd=df_filtered.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(card_type_decline_xcashback_usd)
-def CRD_Granular_kpi(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    df=df[df['type'].str.contains('Insuff_Decline|Cash_Line|Credit_Line',case=False,na=False)]
-    CRD_Granular=df.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(CRD_Granular)
-def CRD_Granular_kpi_usd(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    df=df[df['type'].str.contains('Insuff_Decline|Cash_Line|Credit_Line',case=False,na=False)]
-    CRD_Granular_usd=df.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(CRD_Granular_usd)
-def decline_card_type_kpi_decline(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    type_decline_kpi=df.groupby(['month','type'])['txns'].sum().unstack(fill_value=0)
-    return to_percentage(type_decline_kpi)
-def decline_card_type_kpi_usd_decline(df):
-    df=df[df['decisioning'].str.contains('declined',case=False,na=False)]
-    credit_list=["Insuff_Decline","Credit_Line","Cash_Line"]
-    df['type']=df['type'].mask(df['type'].isin(credit_list),"Credit Related Decline")
-    df=df[df['type'].str.contains('STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',case=False,na=False)]
-    type_decline_kpi_usd=df.groupby(['month','type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_percentage(type_decline_kpi_usd)
-def transaction_decline_kpi(df):
-    kpi=df.groupby(['month','decisioning'])['txns'].sum().unstack(fill_value=0)
-    #kpi['Total']=kpi.sum(axis=1)
-    return kpi
-def transaction_decline_kpi_usd(df):
-    kpi=df.groupby(['month','decisioning'])['amt_usd'].sum().unstack(fill_value=0)
-    #kpi['Total']=kpi.sum(axis=1)
-    return kpi
-#Main Execution
-excel_path=r"C:\Users\2033240\test\AE_Auth_Decline_Summary.xlsx"
-pdf_path=r"C:\Users\2033240\test\AE_Auth_Decline_Summary_data.pdf"
-df=load_data(excel_path,"Auth Decline Summary")
-kpi_pct=approved_declined_kpi(df)
-cp_cnp_pct=cp_cnp_kpi(df)
-reason=decline_reason_kpi(df)
-stip_decline=stip_trend_kpi(df)
-card_type_decline=card_type_kpi(df)
-kpi_pct_usd=approved_declined_kpi_usd(df)
-cp_cnp_pct_usd=cp_cnp_kpi_usd(df)
-reason_usd=decline_reason_kpi_usd(df)
-stip_decline_usd=stip_trend_kpi_usd(df)
-card_type_decline_usd=card_type_kpi_usd(df)
-type_decline=decline_card_type_kpi(df)
-type_decline_usd=decline_card_type_kpi_usd(df)
-type_decline_cnp=decline_card_type_kpi_cnp(df)
-type_decline_usd_cnp=decline_card_type_kpi_usd_cnp(df)
-card_type_decline_platinum=card_type_kpi_platinum(df)
-card_type_decline_platinum_usd=card_type_kpi_platinum_usd(df)
-card_type_decline_infinite=card_type_kpi_infinite(df)
-card_type_decline_infinite_usd=card_type_kpi_infinite_usd(df)
-card_type_decline_cashback=card_type_kpi_cashback(df)
-card_type_decline_cashback_usd=card_type_kpi_cashback_usd(df)
-card_type_decline_MNH=card_type_kpi_MNH(df)
-card_type_decline_MNH_usd=card_type_kpi_MNH_usd(df)
-card_type_decline_saadiq=card_type_kpi_saadiq(df)
-card_type_decline_saadiq_usd=card_type_kpi_saadiq_usd(df)
-card_type_decline_xcashback=card_type_kpi_xcashback(df)
-card_type_decline_xcashback_usd=card_type_kpi_xcashback_usd(df)
-CRD_Granular=CRD_Granular_kpi(df)
-CRD_Granular_usd=CRD_Granular_kpi_usd(df)
-type_decline_kpi=decline_card_type_kpi_decline(df)
-type_decline_kpi_usd=decline_card_type_kpi_usd_decline(df)
-transaction_decline=transaction_decline_kpi(df)
-transaction_decline_usd=transaction_decline_kpi_usd(df)
-with PdfPages(pdf_path) as pdf:
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    cols=['1.Approved','3.Declined']
-    plot_bar(kpi_pct[cols],"Monthly Rate (#) - By Decision","percentage",percent=True,ax=axes[0])#approve and decline
-    plot_line(kpi_pct[cols],"Monthly Rate (#) - By Decision","percentage",percent=True,ax=axes[1])
-    plot_bar(kpi_pct_usd[cols],"Monthly Rate - By Decision ($)","percentage",percent=True,ax=axes[2])#approve and decline
-    plot_line(kpi_pct_usd[cols],"Monthly Rate - By Decision ($)","percentage",percent=True,ax=axes[3])
-    plot_table(kpi_pct[cols],"Monthly Rate (#) - By Decision",percent=True,ax=axes[4])
-    plot_table(kpi_pct_usd[cols],"Monthly Rate - By Decision ($)",percent=True,ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    cp_columns=[col for col in cp_cnp_pct.columns if col not in ['Total']]#cp vs cnp
-    plot_bar(cp_cnp_pct[cp_columns],"Monthly Rate (#) - By CP/CNP","% of Transactions",percent=True,ax=axes[0])
-    plot_line(cp_cnp_pct[cp_columns],"Monthly Rate (#) - By CP/CNP","% of Transactions",percent=True,ax=axes[1])
-    plot_bar(cp_cnp_pct_usd[cp_columns],"Monthly Rate ($) - By CP/CNP","% of $",percent=True,ax=axes[2])
-    plot_line(cp_cnp_pct_usd[cp_columns],"Monthly Rate ($) - By CP/CNP","% of $",percent=True,ax=axes[3])
-    plot_table(cp_cnp_pct[cp_columns],"Monthly Rate (#) - By CP/CNP",percent=True,ax=axes[4])
-    plot_table(cp_cnp_pct_usd[cp_columns],"Monthly Rate ($) - By CP/CNP",percent=True,ax=axes[5])
-    #plt.tight_layout()
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    plot_bar(reason,"Decline Reasons Analysis (#) %","Txns",ax=axes[0])#decline reasons
-    plot_line(reason,"Decline Reasons Analysis (#)%","Txns",ax=axes[1])
-    plot_bar(reason_usd,"Decline Reasons Analysis ($) %","amt_usd",ax=axes[2])#decline reasons
-    plot_line(reason_usd,"Decline Reasons Analysis ($) %","amt_usd",ax=axes[3])
-    plot_table(reason,"Decline Reasons Analysis (#)%",ax=axes[4])
-    plot_table(reason_usd,"Decline Reasons Analysis ($) %",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    #if 'tag' in df.columns:#STIP vs Non STIP
-    plot_bar(stip_decline,"Decline Distribution (#) - By STIP/Non-STIP","% of Decline Transactions",ax=axes[0])
-    plot_line(stip_decline,"Decline Distribution (#) - By STIP/Non-STIP","% of Decline Transactions",ax=axes[1])
-    plot_bar(stip_decline_usd,"Decline Distribution ($) - By STIP/Non-STIP","% of Decline $",ax=axes[2])
-    plot_line(stip_decline_usd,"Decline Distribution ($) - By STIP/Non-STIP","% of Decline $",ax=axes[3])
-    plot_table(stip_decline,"Decline Distribution (#) - By STIP/Non-STIP",ax=axes[4])
-    plot_table(stip_decline_usd,"Decline Distribution ($) - By STIP/Non-STIP",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    #if 'type' in df.columns:#card_type_trend
-    plot_bar(card_type_decline,"# - By Card Type","% of Total Txn",ax=axes[0])
-    plot_line(card_type_decline,"# - By Card Type","% of Total Txn",ax=axes[1])
-    plot_bar(card_type_decline_usd,"$ - By Card Type","% of Total Amt Usd",ax=axes[2])
-    plot_line(card_type_decline_usd,"$ - By Card Type","% of Total Amt Usd",ax=axes[3])
-    plot_table(card_type_decline,"# - By Card Type",ax=axes[4])
-    plot_table(card_type_decline_usd,"$ - By Card Type",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    #if 'cardtype' in df.columns:#decline card_type_trend
-    plot_bar(type_decline,"Decline Waterfall (#) - By Decline Reason - CP","% of Decline #",ax=axes[0])
-    plot_line(type_decline,"Decline Waterfall (#) - By Decline Reason - CP","% of Decline #",ax=axes[1])
-    plot_bar(type_decline_usd,"Decline Waterfall ($) - By Decline Reason - CP","% of Decline $",ax=axes[2])
-    plot_line(type_decline_usd,"Decline Waterfall ($) - By Decline Reason - CP","% of Decline $",ax=axes[3])
-    plot_table(type_decline,"Decline Waterfall (#) - By Decline Reason - CP",ax=axes[4])
-    plot_table(type_decline_usd,"Decline Waterfall ($) - By Decline Reason - CP",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    plot_bar(type_decline_cnp,"Decline Waterfall (#) - By Decline Reason - CNP","% of Decline #",ax=axes[0])
-    plot_line(type_decline_cnp,"Decline Waterfall (#) - By Decline Reason - CNP","% of Decline #",ax=axes[1])
-    plot_bar(type_decline_usd_cnp,"Decline Waterfall ($) - By Decline Reason - CNP","% of Decline $",ax=axes[2])
-    plot_line(type_decline_usd_cnp,"Decline Waterfall ($) - By Decline Reason - CNP","% of Decline $",ax=axes[3])
-    plot_table(type_decline_cnp,"Decline Waterfall (#) - By Decline Reason - CNP",ax=axes[4])
-    plot_table(type_decline_usd_cnp,"Decline Waterfall ($) - By Decline Reason - CNP",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    plot_line(card_type_decline_platinum,"Platinum Card","# Decline Rate",ax=axes[0])
-    plot_line(card_type_decline_platinum_usd,"Platinum Card","$ Decline Rate",ax=axes[1])
-    plot_line(card_type_decline_infinite,"Infinite Card","# Decline Rate",ax=axes[2])
-    plot_line(card_type_decline_infinite_usd,"Infinite Card","$ Decline Rate",ax=axes[3])
-    plot_line(card_type_decline_cashback,"Cashback Card","# Decline Rate",ax=axes[4])
-    plot_line(card_type_decline_cashback_usd,"Cashback Card","$ Decline Rate",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    plot_line(card_type_decline_MNH,"MNH Rewards Plus","# Decline Rate",ax=axes[0])
-    plot_line(card_type_decline_MNH_usd,"MNH Rewards Plus","$ Decline Rate",ax=axes[1])
-    plot_line(card_type_decline_saadiq,"Saadiq Cards","# Decline Rate",ax=axes[2])
-    plot_line(card_type_decline_saadiq_usd,"Saadiq Cards","$ Decline Rate",ax=axes[3])
-    plot_line(card_type_decline_xcashback,"X Cashback Cards","# Decline Rate",ax=axes[4])
-    plot_line(card_type_decline_xcashback_usd,"X Cashback Cards","$ Decline Rate",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    #if 'cardtype' in df.columns:#decline card_type_trend
-    plot_bar(CRD_Granular,"CRD Granular - # Distribution","% of Total Decline #",ax=axes[0])
-    plot_line(CRD_Granular,"CRD Granular - # Distribution","% of Total Decline #",ax=axes[1])
-    plot_bar(CRD_Granular_usd,"CRD Granular - $ Distribution","% of Total Decline $",ax=axes[2])
-    plot_line(CRD_Granular_usd,"CRD Granular - $ Distribution","% of Total Decline $",ax=axes[3])
-    plot_table(CRD_Granular,"CRD Granular - # Distribution","% of Total Decline #",ax=axes[4])
-    plot_table(CRD_Granular_usd,"CRD Granular - $ Distribution","% of Total Decline $",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
-    fig,axes=plt.subplots(3,2,figsize=(20,24))
-    axes=axes.flatten()
-    plot_bar(type_decline_kpi,"# Decline Waterfall Distribution","% of Total Decline #",ax=axes[0])
-    plot_bar(type_decline_kpi_usd,"$ Decline Waterfall Distribution","% of Total Decline $",ax=axes[1])
-    plot_line(type_decline_kpi,"# Decline Waterfall Distribution","% of Total Decline #",ax=axes[2])
-    plot_line(type_decline_kpi_usd,"$ Decline Waterfall Distribution","% of Total Decline $",ax=axes[3])
-    plot_table(type_decline_kpi,"# Decline Waterfall Distribution","% of Total Decline #",ax=axes[4])
-    plot_table(type_decline_kpi_usd,"$ Decline Waterfall Distribution","% of Total Decline $",ax=axes[5])
-    plt.subplots_adjust(left=0.05,right=0.97,top=0.93,bottom=0.25,hspace=0.45,wspace=0.30)
-    pdf.savefig(fig)
-    plt.close(fig)
+
+# ── Helpers ────────────────────────────────────────────────────────────────────
+def to_pct(df): 
+    df = df.fillna(0)
+    return (df.div(df.sum(axis=1).replace(0,np.nan), axis=0)*100).round(2)
+
+def declined(df): return df[df["decisioning"].str.lower().str.contains("decline")].copy()
+
+def remap(df):
+    df = df.copy(); df["type"] = df["type"].mask(df["type"].isin(CRD_TYPES),"Credit Related Decline"); return df
+
+def grp(df, by, col): return df.groupby(["month", by])[col].sum().unstack(fill_value=0)
+
+def rate(num, den): return num.div(den, axis=0).mul(100).round(2)
+
+# ── KPIs ───────────────────────────────────────────────────────────────────────
+def kpi_approv(df):
+    raw = df.groupby(["month","decisioning"])[["txns","amt_usd"]].sum().unstack(fill_value=0)
+    raw.columns = ["_".join(c) for c in raw.columns]
+    t = raw[[c for c in raw.columns if c.startswith("txns_")]].rename(columns=lambda c: c[5:])
+    u = raw[[c for c in raw.columns if c.startswith("amt_usd_")]].rename(columns=lambda c: c[8:])
+    return raw, to_pct(t), to_pct(u)
+
+def kpi_dec_rate(df):
+    g = df.groupby(["month","decisioning"])[["txns","amt_usd"]].sum().unstack(fill_value=0)
+    g.columns = ["_".join(c) for c in g.columns]
+    tot_t = g[[c for c in g.columns if c.startswith("txns_")]].sum(axis=1)
+    tot_u = g[[c for c in g.columns if c.startswith("amt_usd_")]].sum(axis=1)
+    dt = g[[c for c in g.columns if "decline" in c.lower() and c.startswith("txns_")]].sum(axis=1)
+    du = g[[c for c in g.columns if "decline" in c.lower() and c.startswith("amt_usd_")]].sum(axis=1)
+    return pd.DataFrame({"# Decline Rate":(dt/tot_t*100).round(2)}), pd.DataFrame({"$ Decline Rate":(du/tot_u*100).round(2)})
+
+def kpi_by_type(df):
+    d = declined(df); d = remap(d); d["type"] = d["type"].map(RENAME).fillna("Other Decline")
+    rt, ru = grp(d,"type","txns"), grp(d,"type","amt_usd")
+    tot_t, tot_u = df.groupby("month")["txns"].sum(), df.groupby("month")["amt_usd"].sum()
+    return rt, ru, rate(rt,tot_t), rate(ru,tot_u), to_pct(rt), to_pct(ru)
+
+def kpi_crd(df):
+    d = declined(df); crd = d[d["type"].isin(CRD_TYPES)]
+    tot_t, tot_u = df.groupby("month")["txns"].sum(), df.groupby("month")["amt_usd"].sum()
+    dtot_t, dtot_u = d.groupby("month")["txns"].sum(), d.groupby("month")["amt_usd"].sum()
+    rt, ru = grp(crd,"type","txns"), grp(crd,"type","amt_usd")
+    st, su = rt.sum(axis=1), ru.sum(axis=1)
+    return (st/tot_t*100).round(2).rename("CRD%#"), (su/tot_u*100).round(2).rename("CRD%$"), \
+           (st/dtot_t*100).round(2).rename("CRD%Dec#"), (su/dtot_u*100).round(2).rename("CRD%Dec$"), \
+           to_pct(rt), to_pct(ru), rt, ru
+
+def kpi_other(df):
+    d = declined(df)
+    oth = d[d["type"].str.startswith("_") | d["type"].isin(["ATM_Decline","CVV_Decline",
+           "Exceeds withdrawal amount limit - CP","Exceeds withdrawal amount limit - CNP"])]
+    tot_t, tot_u = df.groupby("month")["txns"].sum(), df.groupby("month")["amt_usd"].sum()
+    dtot_t, dtot_u = d.groupby("month")["txns"].sum(), d.groupby("month")["amt_usd"].sum()
+    rt, ru = grp(oth,"type","txns"), grp(oth,"type","amt_usd")
+    return rate(rt,tot_t), rate(ru,tot_u), rate(rt,dtot_t), rate(ru,dtot_u), rt, ru
+
+def kpi_cp_cnp(df):
+    rt, ru = grp(df,"CP_CNP","txns"), grp(df,"CP_CNP","amt_usd")
+    dt, du = grp(declined(df),"CP_CNP","txns"), grp(declined(df),"CP_CNP","amt_usd")
+    return to_pct(rt), to_pct(ru), rate(dt,rt), rate(du,ru), rt, ru
+
+def kpi_card(df):
+    df = df[~df["cardtype"].isin(EXCLUDE)]
+    rt, ru = grp(df,"cardtype","txns"), grp(df,"cardtype","amt_usd")
+    dt, du = grp(declined(df),"cardtype","txns"), grp(declined(df),"cardtype","amt_usd")
+    return to_pct(rt), to_pct(ru), rate(dt,rt), rate(du,ru), rt, ru
+
+def kpi_per_card(df, card):
+    d = declined(df); d = remap(d); d = d[d["type"].str.contains(WF_FILTER, na=False)]
+    d = d[d["cardtype"]==card]; d["type"] = d["type"].map(RENAME).fillna("Other Decline")
+    rt, ru = grp(d,"type","txns"), grp(d,"type","amt_usd")
+    base = df[df["cardtype"]==card].groupby("month")[["txns","amt_usd"]].sum()
+    return to_pct(rt), to_pct(ru), rate(rt,base["txns"]), rate(ru,base["amt_usd"]), rt, ru
+
+def kpi_stip(df):
+    rt, ru = grp(df,"tag","txns"), grp(df,"tag","amt_usd")
+    dt, du = grp(declined(df),"tag","txns"), grp(declined(df),"tag","amt_usd")
+    return to_pct(rt), to_pct(ru), rate(dt,rt), rate(du,ru), to_pct(dt), to_pct(du), dt, du
+
+def kpi_wf(df, segment, col):
+    d = declined(df); d = remap(d); d = d[d["type"].str.contains(WF_FILTER, na=False)]
+    d = d[d[col]==segment]; d["type"] = d["type"].map(RENAME).fillna("Other Decline")
+    rt, ru = grp(d,"type","txns"), grp(d,"type","amt_usd")
+    base = df[df[col]==segment].groupby("month")[["txns","amt_usd"]].sum()
+    return to_pct(rt), to_pct(ru), rate(rt,base["txns"]), rate(ru,base["amt_usd"]), rt, ru
+
+# ── Page helpers ───────────────────────────────────────────────────────────────
+def page(rows, cols, title=None):
+    fig = plt.figure(figsize=(22,28))
+    gs  = gridspec.GridSpec(rows, cols, figure=fig, hspace=0.55, wspace=0.35, left=0.06, right=0.97, top=0.95, bottom=0.04)
+    if title: fig.suptitle(title, fontsize=13, fontweight="bold", y=0.98)
+    return fig, gs
+
+def ax(fig, gs, r, c, rs=1, cs=1): return fig.add_subplot(gs[r:r+rs, c:c+cs])
+
+def save(pdf, fig): pdf.savefig(fig, bbox_inches="tight"); plt.close(fig)
+
+def quad(pdf, fig, gs, r, data, titles, pcts):
+    """Plot bar+line+table+table in rows r, r+1, r+2 using (d0,d1) pairs."""
+    for ci, (df2, t, p) in enumerate(zip(data, titles, pcts)):
+        plot_bar(df2, t, ax=ax(fig,gs,r,ci), percent=p)
+        plot_line(df2, t, ax=ax(fig,gs,r+1,ci), percent=p)
+        plot_table(df2, t, percent=p, ax=ax(fig,gs,r+2,ci))
+
+# ── Pages ──────────────────────────────────────────────────────────────────────
+def pg_overview(pdf, df):
+    raw, pt, pu = kpi_approv(df); rt, ru = kpi_dec_rate(df)
+    dc = [c for c in pt.columns if "decline" in c.lower()]; ac = [c for c in pt.columns if "approve" in c.lower()]
+    traw = raw[[c for c in raw.columns if c.startswith("txns_")]].rename(columns=lambda c:c[5:])
+    uraw = raw[[c for c in raw.columns if c.startswith("amt_usd_")]].rename(columns=lambda c:c[8:])
+    fig, gs = page(4,2, "Transaction & Decline Rate Overview")
+    plot_bar_line(traw, rt, "# Transaction & # Decline Rate", bar_ylabel="# Transactions", ax=ax(fig,gs,0,0))
+    plot_bar_line(uraw, ru, "$ Transaction & $ Decline Rate", bar_ylabel="$ Amount",       ax=ax(fig,gs,0,1))
+    plot_bar(pt[ac+dc], "Monthly Rate (#) – By Decision", ax=ax(fig,gs,1,0))
+    plot_bar(pu[ac+dc], "Monthly Rate ($) – By Decision", ax=ax(fig,gs,1,1))
+    plot_table(traw, "# Approved vs Declined", ax=ax(fig,gs,2,0))
+    plot_table(uraw, "$ Approved vs Declined", ax=ax(fig,gs,2,1))
+    plot_table(rt, "# Decline Rate", percent=True, ax=ax(fig,gs,3,0))
+    plot_table(ru, "$ Decline Rate", percent=True, ax=ax(fig,gs,3,1))
+    save(pdf, fig)
+
+def pg_type(pdf, df):
+    rt,ru,ratet,rateu,pt,pu = kpi_by_type(df)
+    fig, gs = page(5,2, "Decline Rate & Distribution – By Type")
+    plot_decline_rate_line(ratet,"# Decline Rate – By Type",ax=ax(fig,gs,0,0))
+    plot_decline_rate_line(rateu,"$ Decline Rate – By Type",ax=ax(fig,gs,0,1))
+    plot_table(rt,"# Declines by Type",ax=ax(fig,gs,1,0)); plot_table(ru,"$ Declines by Type",ax=ax(fig,gs,1,1))
+    plot_decline_waterfall_bar(pt,"# Decline Waterfall",ax=ax(fig,gs,2,0))
+    plot_decline_waterfall_bar(pu,"$ Decline Waterfall",ax=ax(fig,gs,2,1))
+    plot_line(pt,"# Decline Mix",ax=ax(fig,gs,3,0)); plot_line(pu,"$ Decline Mix",ax=ax(fig,gs,3,1))
+    plot_table(pt,"# Decline Mix %",percent=True,ax=ax(fig,gs,4,0)); plot_table(pu,"$ Decline Mix %",percent=True,ax=ax(fig,gs,4,1))
+    save(pdf, fig)
+
+def pg_crd(pdf, df):
+    a,b,c_,d_,gpt,gpu,grt,gru = kpi_crd(df)
+    tot_t, tot_u = df.groupby("month")["txns"].sum(), df.groupby("month")["amt_usd"].sum()
+    fig, gs = page(5,2, "Credit Related Decline – Deep Dive")
+    plot_line(pd.concat([a,b],axis=1),"CRD – % of Total",ax=ax(fig,gs,0,0),ylim_top=10)
+    plot_line(pd.concat([c_,d_],axis=1),"CRD – % of Decline",ax=ax(fig,gs,0,1),ylim_top=70)
+    plot_bar(gpt,"CRD Granular – # Distribution",ax=ax(fig,gs,1,0))
+    plot_bar(gpu,"CRD Granular – $ Distribution",ax=ax(fig,gs,1,1))
+    plot_line(gpt,"CRD Granular – # Distribution",ax=ax(fig,gs,2,0))
+    plot_line(gpu,"CRD Granular – $ Distribution",ax=ax(fig,gs,2,1))
+    plot_line(rate(grt,tot_t)*100,"CRD – % of Total #",ax=ax(fig,gs,3,0),ylim_top=2)
+    plot_line(rate(gru,tot_u)*100,"CRD – % of Total $",ax=ax(fig,gs,3,1),ylim_top=10)
+    plot_table(grt,"CRD Raw #",ax=ax(fig,gs,4,0)); plot_table(gru,"CRD Raw $",ax=ax(fig,gs,4,1))
+    save(pdf, fig)
+
+def pg_other(pdf, df):
+    a,b,c_,d_,rt,ru = kpi_other(df)
+    fig, gs = page(4,2,"Other Declines – Granular")
+    plot_line(a,"Other – % of Total #",ax=ax(fig,gs,0,0),ylim_top=5)
+    plot_line(b,"Other – % of Total $",ax=ax(fig,gs,0,1),ylim_top=5)
+    plot_line(c_,"Other – % of Decline #",ax=ax(fig,gs,1,0),ylim_top=60)
+    plot_line(d_,"Other – % of Decline $",ax=ax(fig,gs,1,1),ylim_top=60)
+    plot_table(rt,"Other Raw #",ax=ax(fig,gs,2,0)); plot_table(ru,"Other Raw $",ax=ax(fig,gs,2,1))
+    plot_table(a,"Other – % of Total #",percent=True,ax=ax(fig,gs,3,0))
+    plot_table(c_,"Other – % of Decline #",percent=True,ax=ax(fig,gs,3,1))
+    save(pdf, fig)
+
+def pg_card(pdf, df):
+    pt,pu,rtt,rtu,rt,ru = kpi_card(df)
+    fig, gs = page(4,2,"Card Type Distribution & Decline Rates")
+    plot_bar(pt,"# Distribution – By Card Type",ax=ax(fig,gs,0,0))
+    plot_bar(pu,"$ Distribution – By Card Type",ax=ax(fig,gs,0,1))
+    plot_line(rtt,"# Decline Rate – By Card Type",ax=ax(fig,gs,1,0),ylim_top=15)
+    plot_line(rtu,"$ Decline Rate – By Card Type",ax=ax(fig,gs,1,1),ylim_top=50)
+    plot_table(rt,"# Transactions by Card",ax=ax(fig,gs,2,0)); plot_table(ru,"$ Amount by Card",ax=ax(fig,gs,2,1))
+    plot_table(rtt,"# Decline Rate %",percent=True,ax=ax(fig,gs,3,0))
+    plot_table(rtu,"$ Decline Rate %",percent=True,ax=ax(fig,gs,3,1))
+    save(pdf, fig)
+
+def pg_per_card(pdf, df):
+    for card in CARDS:
+        if df[df["cardtype"]==card].empty: continue
+        pt,pu,rtt,rtu,rt,ru = kpi_per_card(df,card)
+        fig, gs = page(4,2,f"{card} – Decline Breakdown")
+        plot_line(rtt,f"{card} – # Decline Rate",ax=ax(fig,gs,0,0),ylim_top=5)
+        plot_line(rtu,f"{card} – $ Decline Rate",ax=ax(fig,gs,0,1),ylim_top=10)
+        plot_bar(pt,f"{card} – # Decline Mix",ax=ax(fig,gs,1,0))
+        plot_bar(pu,f"{card} – $ Decline Mix",ax=ax(fig,gs,1,1))
+        plot_table(rt,f"{card} – Raw #",ax=ax(fig,gs,2,0)); plot_table(ru,f"{card} – Raw $",ax=ax(fig,gs,2,1))
+        plot_table(rtt,f"{card} – # Rate %",percent=True,ax=ax(fig,gs,3,0))
+        plot_table(rtu,f"{card} – $ Rate %",percent=True,ax=ax(fig,gs,3,1))
+        save(pdf, fig)
+
+def pg_stip(pdf, df):
+    pt,pu,rtt,rtu,dt,du,drt,dru = kpi_stip(df)
+    fig, gs = page(5,2,"STIP vs Non-STIP")
+    plot_bar(pt,"Monthly Rate (#) – STIP/Non-STIP",ax=ax(fig,gs,0,0))
+    plot_bar(pu,"Monthly Rate ($) – STIP/Non-STIP",ax=ax(fig,gs,0,1))
+    plot_table(drt,"# STIP Declined",ax=ax(fig,gs,1,0)); plot_table(dru,"$ STIP Declined",ax=ax(fig,gs,1,1))
+    plot_line(rtt,"# Decline Rate – STIP",ax=ax(fig,gs,2,0),ylim_top=100)
+    plot_line(rtu,"$ Decline Rate – STIP",ax=ax(fig,gs,2,1),ylim_top=100)
+    plot_bar(dt,"# Decline Dist – STIP",ax=ax(fig,gs,3,0)); plot_bar(du,"$ Decline Dist – STIP",ax=ax(fig,gs,3,1))
+    plot_table(rtt,"# Decline Rate %",percent=True,ax=ax(fig,gs,4,0))
+    plot_table(rtu,"$ Decline Rate %",percent=True,ax=ax(fig,gs,4,1))
+    save(pdf, fig)
+
+def pg_cp_cnp(pdf, df):
+    pt,pu,rtt,rtu,rt,ru = kpi_cp_cnp(df)
+    fig, gs = page(4,2,"Card Present vs Card Not Present")
+    plot_bar(pt,"Monthly Rate (#) – CP/CNP",ax=ax(fig,gs,0,0))
+    plot_bar(pu,"Monthly Rate ($) – CP/CNP",ax=ax(fig,gs,0,1))
+    plot_table(rt,"# Transactions CP/CNP",ax=ax(fig,gs,1,0)); plot_table(ru,"$ Amount CP/CNP",ax=ax(fig,gs,1,1))
+    plot_line(rtt,"# Decline Rate – CP/CNP",ax=ax(fig,gs,2,0),ylim_top=20)
+    plot_line(rtu,"$ Decline Rate – CP/CNP",ax=ax(fig,gs,2,1),ylim_top=20)
+    plot_table(rtt,"# Decline Rate %",percent=True,ax=ax(fig,gs,3,0))
+    plot_table(rtu,"$ Decline Rate %",percent=True,ax=ax(fig,gs,3,1))
+    save(pdf, fig)
+
+def pg_wf(pdf, df):
+    fig, gs = page(4,2,"Decline Waterfall – CP vs CNP")
+    for ci, seg in enumerate(["CP","CNP"]):
+        pt,pu,rtt,rtu,rt,ru = kpi_wf(df, seg, "CP_CNP")
+        plot_bar(pt,f"{seg} – # Waterfall",ax=ax(fig,gs,0,ci))
+        plot_bar(pu,f"{seg} – $ Waterfall",ax=ax(fig,gs,1,ci))
+        plot_table(rt,f"{seg} – Raw #",ax=ax(fig,gs,2,ci))
+        plot_table(ru,f"{seg} – Raw $",ax=ax(fig,gs,3,ci))
+    save(pdf, fig)
+
+def pg_reason_rate(pdf, df):
+    fig, gs = page(4,2,"Decline Rate by Reason – CP and CNP")
+    for ci, seg in enumerate(["CP","CNP"]):
+        pt,pu,rtt,rtu,_,_ = kpi_wf(df, seg, "CP_CNP")
+        plot_line(rtt,f"{seg} – # Decline Rate by Reason",ax=ax(fig,gs,ci*2,0),ylim_top=5)
+        plot_line(rtu,f"{seg} – $ Decline Rate by Reason",ax=ax(fig,gs,ci*2,1),ylim_top=15)
+        plot_table(rtt,f"{seg} – # Rate %",percent=True,ax=ax(fig,gs,ci*2+1,0))
+        plot_table(rtu,f"{seg} – $ Rate %",percent=True,ax=ax(fig,gs,ci*2+1,1))
+    save(pdf, fig)
+
+# ── Main ───────────────────────────────────────────────────────────────────────
+def main():
+    print("Loading …"); df = load(EXCEL_PATH, SHEET)
+    print(f"  {len(df):,} rows | {df['month'].nunique()} months")
+    with PdfPages(PDF_PATH) as pdf:
+        pdf.infodict().update({"Title":"AE Auth Decline 2025","Subject":"Decline Analysis"})
+        pg_overview(pdf,df); pg_type(pdf,df); pg_crd(pdf,df); pg_other(pdf,df)
+        pg_card(pdf,df); pg_per_card(pdf,df); pg_stip(pdf,df)
+        pg_cp_cnp(pdf,df); pg_wf(pdf,df); pg_reason_rate(pdf,df)
+    print(f"Saved → {PDF_PATH}")
+
+if __name__ == "__main__": main()
 import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 import pandas as pd
-def plot_bar(df_plot,title,ylabel,percent=True,ax=None):#bar chart
-    if ax is None:
-        _,ax=plt.subplots(figsize=(20,18))
-    df=df_plot.copy()
-    df.index=df.index.strftime('%b-%y')
-    df.plot(kind='bar',stacked=True,ax=ax)
-    ax.tick_params(axis='x',rotation=0)
-    ax.set_title(title)
-    ax.set_xlabel("Month")
-    ax.set_ylabel(ylabel)
+import numpy as np
+
+PALETTE = ["#2196F3","#4CAF50","#FF9800","#9C27B0","#F44336","#00BCD4","#8BC34A","#FF5722","#607D8B","#E91E63"]
+DECLINE_COLORS = {"Credit Related Decline":"#2196F3","STIP_DECLINE":"#9C27B0","_Other declines":"#00BCD4",
+                  "FALCON_DECLINE":"#FF9800","Other Decline":"#00BCD4","Falcon Decline":"#FF9800","STIP Decline":"#9C27B0"}
+
+def _fmt(df):
+    df = df.copy()
+    if hasattr(df.index, "strftime"): df.index = df.index.strftime("%b-%y")
+    return df
+
+def _colors(cols): return [DECLINE_COLORS.get(c, PALETTE[i % len(PALETTE)]) for i, c in enumerate(cols)]
+def _legend(ax, cols): ax.legend(loc="upper center", bbox_to_anchor=(0.5,-0.22), ncol=min(len(cols),6), frameon=False, fontsize=7)
+
+def plot_bar(df_plot, title, ylabel="", percent=True, ax=None):
+    if ax is None: _, ax = plt.subplots(figsize=(18,6))
+    df = _fmt(df_plot)
+    df.plot(kind="bar", stacked=True, ax=ax, color=_colors(df.columns.tolist()), width=0.65, edgecolor="white")
+    ax.set(title=title, xlabel="Month", ylabel=ylabel)
+    ax.tick_params(axis="x", rotation=0, labelsize=7); ax.tick_params(axis="y", labelsize=7)
     if percent:
-        ax.set_ylim(0,100)
-        ax.set_yticks(range(0,101,20))
-        ax.set_yticklabels([f"{i}%" for i in range(0,101,20)])
-        for c in ax.containers:
-            #ax.bar_label(c,labels=[f"{round(v,2)}%"for v in c.datavalues],label_type='center')
-            ax.bar_label(c,fmt='%.2f%%',label_type='center')
-    ax.legend(
-        loc='upper center',
-        bbox_to_anchor=(0.5,-0.2),
-        ncol=8,
-        frameon=False,
-        fontsize=9
-    )
-    plt.subplots_adjust(bottom=0.25,top=0.95,left=0.08,right=0.95)
+        ax.set_ylim(0,105); ax.yaxis.set_major_formatter(mticker.PercentFormatter())
+    for c in ax.containers:
+        ax.bar_label(c, labels=[f"{b.get_height():.1f}%" if (percent and b.get_height()>=3) else "" for b in c],
+                     label_type="center", fontsize=6, color="white", fontweight="bold")
+    _legend(ax, df.columns); ax.grid(axis="y", linestyle="--", alpha=0.4)
     return ax
-def plot_line(df_plot,title,ylabel,percent=True,ax=None):#line chart
-    if ax is None:
-        _,ax=plt.subplots(figsize=(20,18))
-    df=df_plot.copy()
-    df.index=pd.to_datetime(df.index)
-    for col in df.columns:
-        ax.plot(df.index,df[col],marker='o',label=col)
+
+def plot_line(df_plot, title, ylabel="", percent=True, ax=None, ylim_top=None):
+    if ax is None: _, ax = plt.subplots(figsize=(18,6))
+    df = _fmt(df_plot); x = range(len(df))
+    for i, col in enumerate(df.columns):
+        y = df[col].values; c = _colors(df.columns.tolist())[i]
+        ax.plot(x, y, marker="o", markersize=4, linewidth=1.5, label=col, color=c)
+        for xi, yi in zip(x, y):
+            if not np.isnan(yi):
+                ax.annotate(f"{yi:.2f}%" if percent else f"{yi:.2f}", (xi,yi),
+                            textcoords="offset points", xytext=(0,6), ha="center", fontsize=6, color=c)
+    ax.set(title=title, xlabel="Month", ylabel=ylabel)
+    ax.set_xticks(list(x)); ax.set_xticklabels(df.index.tolist(), rotation=45, ha="right", fontsize=7)
+    ax.tick_params(axis="y", labelsize=7)
     if percent:
-        for col in df.columns:
-            for x,y in zip(df.index,df[col]):
-                ax.text(x,y+1,f'{y:.2f}%',ha='center',va='bottom',fontsize=9)
-    #df_plot.plot(kind='line',marker='o',ax=ax)
-    ax.set_title(title)
-    ax.set_xlabel("Month")
-    ax.set_ylabel(ylabel)
-    ax.set_xticks(df.index)
-    ax.set_xticklabels([d.strftime('%b-%y') for d in df.index],rotation=45)
-    ax.margins(x=0.05)
-    if percent:
-        ax.set_ylim(0,100)
-        ax.set_yticks(range(0,101,20))
-        ax.set_yticklabels([f"{i}%" for i in range(0,101,20)])
-    ax.legend(
-        loc='upper center',
-        bbox_to_anchor=(0.5,-0.2),
-        ncol=8,
-        frameon=False,
-        fontsize=9
-    )
-    plt.subplots_adjust(bottom=0.25,top=0.95,left=0.08,right=0.95)
+        ax.set_ylim(0, ylim_top or max(df.max().max()*1.25, 5))
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter())
+    _legend(ax, df.columns); ax.grid(axis="y", linestyle="--", alpha=0.4)
     return ax
-def plot_table(df_plot,title,percent=False,ax=None):#table
-    if ax is None:
-        _,ax=plt.subplots(figsize=(20,18))
-    ax.axis('off')
-    table_df=df_plot.copy()
-    table_df.insert(0,'month',table_df.index.strftime('%b-%y'))
-    if percent:
-        table_df=table_df.round(2)
-    table_df=table_df.reset_index(drop=True)
-    table=ax.table(cellText=table_df.values,colLabels=table_df.columns,loc='center')
-    table.auto_set_column_width(col=list(range(len(table_df.columns))))
-    table.auto_set_font_size(False)
-    table.set_fontsize(12)
-    table.scale(1.8,2.2)
-    ax.set_title(title)
-    plt.subplots_adjust(bottom=0.25,top=0.95,left=0.08,right=0.95)
+
+def plot_bar_line(bar_df, line_df, title, bar_ylabel="", line_ylabel="Decline Rate %", ax=None):
+    if ax is None: _, ax = plt.subplots(figsize=(18,7))
+    ax2 = ax.twinx()
+    _fmt(bar_df).plot(kind="bar", stacked=True, ax=ax, color=_colors(bar_df.columns.tolist()), width=0.65, edgecolor="white", legend=False)
+    ldf = _fmt(line_df); x = range(len(ldf))
+    for col in ldf.columns:
+        y = ldf[col].values
+        ax2.plot(x, y, marker="o", markersize=4, linewidth=1.5, color="#F44336", label=col)
+        for xi, yi in zip(x, y):
+            if not np.isnan(yi): ax2.annotate(f"{yi:.1f}%",(xi,yi),textcoords="offset points",xytext=(0,6),ha="center",fontsize=6.5,color="#F44336")
+    ax.set(title=title, xlabel="Month", ylabel=bar_ylabel); ax2.set_ylabel(line_ylabel, fontsize=8, color="#F44336")
+    ax.tick_params(axis="x", rotation=0, labelsize=7); ax.tick_params(axis="y", labelsize=7)
+    ax2.tick_params(axis="y", labelsize=7, colors="#F44336"); ax2.yaxis.set_major_formatter(mticker.PercentFormatter())
+    h1,l1 = ax.get_legend_handles_labels(); h2,l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1+h2, l1+l2, loc="upper center", bbox_to_anchor=(0.5,-0.18), ncol=6, frameon=False, fontsize=7)
+    ax.grid(axis="y", linestyle="--", alpha=0.4)
+    return ax, ax2
+
+def plot_table(df_plot, title, percent=False, ax=None):
+    if ax is None: _, ax = plt.subplots(figsize=(18,3))
+    ax.axis("off")
+    df = _fmt(df_plot).T
+    def fmt(v):
+        if percent: return f"{v:.2f}%"
+        if abs(v)>=1e6: return f"${v/1e6:.2f}M"
+        if abs(v)>=1e3: return f"{v/1e3:.1f}K"
+        return f"{v:.0f}"
+    tbl = ax.table(cellText=[[fmt(v) for v in row] for row in df.values],
+                   rowLabels=df.index.tolist(), colLabels=df.columns.tolist(), loc="center", cellLoc="center")
+    tbl.auto_set_font_size(False); tbl.set_fontsize(7); tbl.scale(1,1.6)
+    for (r,c), cell in tbl.get_celld().items():
+        if r==0: cell.set_facecolor("#1565C0"); cell.set_text_props(color="white", fontweight="bold")
+        elif c==-1: cell.set_facecolor("#E3F2FD"); cell.set_text_props(fontweight="bold")
+        else: cell.set_facecolor("#FAFAFA" if r%2==0 else "white")
+    ax.set_title(title, fontsize=9, fontweight="bold", pad=4)
     return ax
+
+plot_decline_rate_line     = lambda df,t,y="",ax=None: plot_line(df,t,y,ax=ax,ylim_top=max(df.max().max()*1.4+0.5,10))
+plot_decline_waterfall_bar = lambda df,t,y="% of Total Decline #",ax=None: plot_bar(df,t,y,ax=ax)
