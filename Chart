@@ -240,19 +240,19 @@ def decline_cnp_kpi_usd(df):
 # ─────────────────────────────────────────────
 # 3. COLOUR PALETTES  (match dashboard images)
 # ─────────────────────────────────────────────
-GREEN    = '#4CAF50'
-RED      = '#F44336'
-TEAL     = '#00838F'
-TEAL2    = '#00ACC1'
-BLUE     = '#1565C0'
-ORANGE   = '#FF8F00'
-PURPLE   = '#6A1B9A'
-LIME     = '#558B2F'
-CYAN     = '#00BCD4'
-DARK_TEAL= '#006064'
-GOLD     = '#F9A825'
-PINK     = '#E91E63'
-GREY     = '#9E9E9E'
+GREEN    = '#38D200'
+RED      = '#D50000'
+TEAL     = '#0473EA'
+TEAL2    = '#38D200'
+BLUE     = '#52DAFF'
+ORANGE   = '#020B43'
+PURPLE   = '#7D17F2'
+LIME     = '#05561C'
+CYAN     = '#F98764'
+DARK_TEAL= '#0473EA'
+GOLD     = '#FFC120'
+PINK     = '#82F028'
+GREY     = '#525355'
 
 TYPE_COLORS = {
     'Credit Related Decline': BLUE,
@@ -266,12 +266,12 @@ CRD_COLORS = {
     'Cash_Line':      LIME,
 }
 CARD_COLORS = {
-    'CASHBACK':       '#1565C0',
-    'INFINITE':       '#283593',
-    'MNH REWARDS PLUS':'#F57F17',
-    'PLATINUM':       '#795548',
-    'SAADIQ':         '#00897B',
-    'X CASHBACK':     '#E53935',
+    'CASHBACK':       '#52DAFF',
+    'INFINITE':       '#0473EA',
+    'MNH REWARDS PLUS':'#F98764',
+    'PLATINUM':       '#FFC120',
+    'SAADIQ':         '#82F028',
+    'X CASHBACK':     '#D50000',
 }
 STIP_COLORS = {
     'NONSTIPDEC':   ORANGE,
@@ -285,8 +285,8 @@ APPROVE_COLORS = {
     '3.Declined': RED,
 }
 CP_COLORS = {
-    'CP':  '#1565C0',
-    'CNP': '#FF8F00',
+    'CP':  '#0473EA',
+    'CNP': '#F98764',
 }
 
 # ─────────────────────────────────────────────
@@ -540,7 +540,6 @@ matplotlib.use('Agg')   # non-interactive backend (safe for PDF generation)
 
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
-import matplotlib.patches as mpatches
 import pandas as pd
 import numpy as np
 
@@ -548,20 +547,20 @@ import numpy as np
 # COLOUR PALETTE  (matches the dashboard screenshots)
 # ─────────────────────────────────────────────────────────────
 _PALETTE = [
-    '#1565C0',   # deep blue
-    '#FF8F00',   # amber / orange
-    '#00ACC1',   # cyan
-    '#E91E63',   # pink / magenta
-    '#558B2F',   # dark green
-    '#6A1B9A',   # purple
-    '#F57F17',   # gold
-    '#00695C',   # dark teal
-    '#BF360C',   # dark orange-red
-    '#1A237E',   # indigo
+    '#7D17F2',   # deep blue
+    '#FFC120',   # amber / orange
+    '#0473EA',   # cyan
+    '#D50000',   # pink / magenta
+    '#82F028',   # dark green
+    '#7D17F2',   # purple
+    '#52DAFF',   # gold
+    '#05561C',   # dark teal
+    '#F98764',   # dark orange-red
+    '#001E8C',   # indigo
 ]
 
-GREEN  = '#4CAF50'
-RED    = '#F44336'
+GREEN  = '#38D200'
+RED    = '#D50000'
 
 
 def _month_labels(index):
@@ -754,9 +753,9 @@ def plot_table(df_plot, title, percent=False, ax=None):
     # Build display frame
     display = df.copy()
     if percent:
-        display = display.applymap(lambda v: f"{v:.2f}%")
+        display = display.map(lambda v: f"{v:.2f}%")
     else:
-        display = display.applymap(_fmt_num)
+        display = display.map(_fmt_num)
 
     display.insert(0, 'Month', _month_labels(df.index))
     display = display.reset_index(drop=True)
@@ -772,16 +771,16 @@ def plot_table(df_plot, title, percent=False, ax=None):
     tbl.scale(1.0, 1.6)
 
     # Header styling
-    for j in range(len(display.columns)):
-        cell = tbl[0, j]
-        cell.set_facecolor('#1565C0')
-        cell.set_text_props(color='white', fontweight='bold')
+    #for j in range(len(display.columns)):
+        #cell = tbl[0, j]
+        #cell.set_facecolor('#525355')
+        #cell.set_text_props(color='white', fontweight='bold')
 
     # Alternating row colours
-    for i in range(1, len(display) + 1):
-        bg = '#EBF5FB' if i % 2 == 0 else 'white'
-        for j in range(len(display.columns)):
-            tbl[i, j].set_facecolor(bg)
+    #for i in range(1, len(display) + 1):
+       # bg = '#ffffff' if i % 2 == 0 else 'white'
+        #for j in range(len(display.columns)):
+           # tbl[i, j].set_facecolor(bg)
 
     tbl.auto_set_column_width(list(range(len(display.columns))))
     ax.set_title(title, fontsize=9, fontweight='bold', pad=4)
