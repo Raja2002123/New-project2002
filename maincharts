@@ -719,3 +719,74 @@ def plot_stacked_bar_with_line(df_bar, series_line, title, ylabel,
 def plot_dual_axis_bar_line(df_bar, series_line, title, ylabel, colors=None, ax=None):
     return plot_stacked_bar_with_line(df_bar, series_line, title, ylabel,
                                       colors=colors, ax=ax)
+def plot_line(df_plot, title, ylabel, colors=None, percent=True, ax=None):
+    if ax is None:
+        _, ax = plt.subplots(figsize=(14, 7))
+    df  = df_plot.copy().fillna(0)
+    lbl = _month_labels(df.index)
+    cl  = _cl(df, colors)
+    x   = np.arange(len(lbl))
+    handles = []
+    for i, col in enumerate(df.columns):
+        v = df[col].values.astype(float)
+        line, = ax.plot(x, v, marker="o", color=cl[i], linewidth=1.8,
+                        markersize=5, label=col)
+        handles.append(line)
+        for xi, vi in enumerate(v):
+            ax.annotate(f"{vi:.2f}%" if percent else _fmt_num(vi),
+                        (xi, vi), textcoords="offset points", xytext=(0, 7),
+                        ha="center", fontsize=6, color=cl[i])
+    ax.set_xticks(x)
+    ax.set_xticklabels(lbl, rotation=45, ha="right", fontsize=8)
+    ax.set_title(title, fontsize=10, fontweight="bold", pad=6)
+    ax.set_xlabel("Month", fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
+    ax.margins(x=0.05)
+    if percent:
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter())
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    # Store for external legend placement
+    ax._legend_handles = handles
+    ax._legend_labels  = [str(col) for col in df.columns]
+    # Default legend inside axes (used by all pages EXCEPT Page 13)
+    ax.legend(handles, ax._legend_labels,
+              loc="upper center", bbox_to_anchor=(0.5, -0.30),
+              ncol=min(len(df.columns), 4), frameon=False, fontsize=7.5)
+    return ax
+# ── PAGE 10 – Other Declines: Line Trends ────────────────────
+        import matplotlib.gridspec as gridspec
+        fig = plt.figure(figsize=(26, 32))
+        _title(fig, "PAGE 13 | Other Declines Granular - Trend Lines")
+        gs = gridspec.GridSpec(2, 2, figure=fig,
+                               left=0.06, right=0.94, top=0.93, bottom=0.03,
+                               hspace=0.52, wspace=0.28)
+        ax0 = fig.add_subplot(gs[0, 0])
+        ax1 = fig.add_subplot(gs[0, 1])
+        ax2 = fig.add_subplot(gs[1, 0])
+        ax3 = fig.add_subplot(gs[1, 1])
+
+        plot_line(oth_ptot[top],    "Other Declines – % of Total #",   "% Total#",   colors=opal,  ax=ax0)
+        plot_line(oth_ptot_u[topu], "Other Declines – % of Total $",   "% Total$",   colors=opalu, ax=ax1)
+        plot_line(oth_pdec[top],    "Other Declines – % of Decline #", "% Decline#", colors=opal,  ax=ax2)
+        plot_line(oth_pdec_u[topu], "Other Declines – % of Decline $", "% Decline$", colors=opalu, ax=ax3)
+
+        # Override legend to be INSIDE each axes — guaranteed always visible
+        for axi in [ax0, ax1, ax2, ax3]:
+            if hasattr(axi, '_legend_handles'):
+                axi.get_legend().remove()          # remove the outside legend
+                axi.legend(
+                    axi._legend_handles,
+                    axi._legend_labels,
+                    loc="upper right",             # inside top-right of chart
+                    ncol=1,
+                    fontsize=6.5,
+                    frameon=True,
+                    framealpha=0.88,
+                    fancybox=True,
+                    borderpad=0.5,
+                    labelspacing=0.25,
+                )
+
+        pdf.savefig(fig, bbox_inches="tight")
+        plt.close(fig)
