@@ -1,803 +1,772 @@
+"""
+main.py  –  AE Auth Decline Summary Dashboard
+==============================================
+Reads  : AE_Auth_Decline_Summary.xlsx  (sheet "Auth Decline Summary")
+Writes : AE_Auth_Decline_Summary_data.pdf
+Excel columns (A-P):
+  country | month | network | CP_CNP | BIN | cardtype |
+  decisioning | tag | type | DECI_CD_ORIG | DECI_CD |
+  TRANSACTION_ADVICE_XCD | ExRate | txns | AMT | amt_usd
+PDF pages:
+  1  Overall Transactions & Decline Rate
+  2  Decline Rate by Decline Type
+  3  Credit Related Decline (CRD)
+  4  Card Type Distribution
+  5  PLATINUM & INFINITE
+  6  CASHBACK & MNH REWARDS PLUS
+  7  SAADIQ & X CASHBACK
+  8  STIP vs Non-STIP
+  9  Card Present vs Card Not Present
+  10 Other Declines Granular – Trend Lines
+  11 Other Declines Granular – All Tables
+
+CHANGES vs original:
+  • Pages 5-7 (per-card): volume K/M and $K/$M rows now shown as LARGE TABLES
+    (same visual size as a chart) instead of chart+table combos.
+    Rate lines + waterfall bars + rate % tables are kept.
+  • Large table helpers (plot_table_count_large / plot_table_usd_large) added
+    to charts.py for bigger, more readable rendering.
+"""
 import pandas as pd
-import matplotlib.pyplot as plt
-import matplotlib.ticker as mticker
 import numpy as np
+import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 from charts import (
-    plot_bar, plot_line, plot_stacked_bar_with_line,
-    plot_table, plot_dual_axis_bar_line
+    plot_bar, plot_line,
+    plot_stacked_bar_with_line,
+    plot_table, plot_table_count, plot_table_usd,
+    plot_table_large, plot_table_count_large, plot_table_usd_large,
+    _auto_colors,
 )
-
-# ─────────────────────────────────────────────
-# 1. LOAD & PREPARE DATA
-# ─────────────────────────────────────────────
-def load_data(excel_path, sheet_name="Auth Decline Summary"):
-    df = pd.read_excel(excel_path, sheet_name=sheet_name)
-    df.columns = df.columns.str.strip().str.lower()
-    # Normalise column names
-    df.rename(columns={
-        'cp_cnp': 'CP_CNP',
-        'cardtype': 'cardtype',
-        'decisioning': 'decisioning',
-        'tag': 'tag',
-        'type': 'type',
-        'network': 'network',
-        'txns': 'txns',
-        'amt_usd': 'amt_usd',
-        'month': 'month',
-    }, inplace=True)
-
-    df['month'] = pd.to_datetime(df['month'], format='%b-%y', errors='coerce')
-    df = df.dropna(subset=['month'])
-    df = df[df['month'].dt.year == 2025]
-    return df
-
-# ─────────────────────────────────────────────
-# 2. KPI HELPERS
-# ─────────────────────────────────────────────
-def to_pct(df):
-    df = df.fillna(0)
-    total = df.sum(axis=1)
-    return df.div(total, axis=0).mul(100).round(2)
-
-def approved_declined_kpi(df):
-    kpi = df.groupby(['month', 'decisioning'])['txns'].sum().unstack(fill_value=0)
-    return to_pct(kpi)
-
-def approved_declined_kpi_usd(df):
-    kpi = df.groupby(['month', 'decisioning'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_pct(kpi)
-
-def transaction_decline_kpi(df):
-    return df.groupby(['month', 'decisioning'])['txns'].sum().unstack(fill_value=0)
-
-def transaction_decline_kpi_usd(df):
-    return df.groupby(['month', 'decisioning'])['amt_usd'].sum().unstack(fill_value=0)
-
-def cp_cnp_kpi(df):
-    cp = df.groupby(['month', 'CP_CNP'])['txns'].sum().unstack(fill_value=0)
-    return to_pct(cp)
-
-def cp_cnp_kpi_usd(df):
-    cp = df.groupby(['month', 'CP_CNP'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_pct(cp)
-
-def _declines(df):
-    return df[df['decisioning'].str.contains('declined', case=False, na=False)].copy()
-
-def _credit_list_remap(df):
-    credit_list = ["Insuff_Decline", "Cash_Line", "Credit_Line"]
-    df = df.copy()
-    df['type'] = df['type'].mask(df['type'].isin(credit_list), "Credit Related Decline")
-    return df
-
-def _waterfall_filter(df):
-    return df[df['type'].str.contains(
-        'STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline',
-        case=False, na=False)]
-
-# Decline by type (# and $) – overall
-def decline_type_kpi(df):
-    d = _declines(df)
-    d = _credit_list_remap(d)
-    d = _waterfall_filter(d)
-    pivot = d.groupby(['month', 'type'])['txns'].sum().unstack(fill_value=0)
-    # keep count for rate
-    total = df.groupby('month')['txns'].sum()
-    rate = pivot.div(total, axis=0).mul(100).round(4)
-    return pivot, rate, to_pct(pivot)
-
-def decline_type_kpi_usd(df):
-    d = _declines(df)
-    d = _credit_list_remap(d)
-    d = _waterfall_filter(d)
-    pivot = d.groupby(['month', 'type'])['amt_usd'].sum().unstack(fill_value=0)
-    total = df.groupby('month')['amt_usd'].sum()
-    rate = pivot.div(total, axis=0).mul(100).round(4)
-    return pivot, rate, to_pct(pivot)
-
-# STIP vs Non-STIP
-def stip_kpi(df):
-    d = _declines(df)
-    pivot = d.groupby(['month', 'tag'])['txns'].sum().unstack(fill_value=0)
-    return to_pct(pivot)
-
-def stip_kpi_usd(df):
-    d = _declines(df)
-    pivot = d.groupby(['month', 'tag'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_pct(pivot)
-
-def stip_rate_kpi(df):
-    d = _declines(df)
-    pivot = d.groupby(['month', 'tag'])['txns'].sum().unstack(fill_value=0)
-    total = df.groupby('month')['txns'].sum()
-    return pivot.div(total, axis=0).mul(100).round(4)
-
-def stip_rate_kpi_usd(df):
-    d = _declines(df)
-    pivot = d.groupby(['month', 'tag'])['amt_usd'].sum().unstack(fill_value=0)
-    total = df.groupby('month')['amt_usd'].sum()
-    return pivot.div(total, axis=0).mul(100).round(4)
-
-# CRD Granular
-def crd_granular_kpi(df):
-    d = _declines(df)
-    d = d[d['type'].str.contains('Insuff_Decline|Cash_Line|Credit_Line', case=False, na=False)]
-    pivot = d.groupby(['month', 'type'])['txns'].sum().unstack(fill_value=0)
-    total = df.groupby('month')['txns'].sum()
-    pct_of_total = pivot.div(total, axis=0).mul(100).round(4)
-    return to_pct(pivot), pct_of_total
-
-def crd_granular_kpi_usd(df):
-    d = _declines(df)
-    d = d[d['type'].str.contains('Insuff_Decline|Cash_Line|Credit_Line', case=False, na=False)]
-    pivot = d.groupby(['month', 'type'])['amt_usd'].sum().unstack(fill_value=0)
-    total = df.groupby('month')['amt_usd'].sum()
-    pct_of_total = pivot.div(total, axis=0).mul(100).round(4)
-    return to_pct(pivot), pct_of_total
-
-# Credit Related Decline % of Total
-def crd_pct_total(df):
-    d = _declines(df)
-    d = d[d['type'].isin(["Insuff_Decline", "Cash_Line", "Credit_Line"])]
-    crd_txns = d.groupby('month')['txns'].sum()
-    total_txns = df.groupby('month')['txns'].sum()
-    crd_txns_usd = d.groupby('month')['amt_usd'].sum()
-    total_usd = df.groupby('month')['amt_usd'].sum()
-    return (crd_txns / total_txns * 100).round(4), (crd_txns_usd / total_usd * 100).round(4)
-
-def crd_pct_decline(df):
-    d = _declines(df)
-    crd = d[d['type'].isin(["Insuff_Decline", "Cash_Line", "Credit_Line"])]
-    crd_txns = crd.groupby('month')['txns'].sum()
-    total_decline = d.groupby('month')['txns'].sum()
-    crd_txns_usd = crd.groupby('month')['amt_usd'].sum()
-    total_decline_usd = d.groupby('month')['amt_usd'].sum()
-    return (crd_txns / total_decline * 100).round(4), (crd_txns_usd / total_decline_usd * 100).round(4)
-
-# Card Type distribution (all txns)
-def card_type_kpi(df):
-    EXCL = ['TITANIUM', 'TITANIUM2', 'WORLD']
-    d = df[~df['cardtype'].isin(EXCL)]
-    pivot = d.groupby(['month', 'cardtype'])['txns'].sum().unstack(fill_value=0)
-    return to_pct(pivot)
-
-def card_type_kpi_usd(df):
-    EXCL = ['TITANIUM', 'TITANIUM2', 'WORLD']
-    d = df[~df['cardtype'].isin(EXCL)]
-    pivot = d.groupby(['month', 'cardtype'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_pct(pivot)
-
-# Decline rate by card type
-def decline_rate_by_cardtype(df):
-    EXCL = ['TITANIUM', 'TITANIUM2', 'WORLD']
-    d = df[~df['cardtype'].isin(EXCL)]
-    total = d.groupby(['month', 'cardtype'])['txns'].sum().unstack(fill_value=0)
-    dec = _declines(d).groupby(['month', 'cardtype'])['txns'].sum().unstack(fill_value=0)
-    return dec.div(total).mul(100).round(4)
-
-def decline_rate_by_cardtype_usd(df):
-    EXCL = ['TITANIUM', 'TITANIUM2', 'WORLD']
-    d = df[~df['cardtype'].isin(EXCL)]
-    total = d.groupby(['month', 'cardtype'])['amt_usd'].sum().unstack(fill_value=0)
-    dec = _declines(d).groupby(['month', 'cardtype'])['amt_usd'].sum().unstack(fill_value=0)
-    return dec.div(total).mul(100).round(4)
-
-# Per-card decline by reason
-def _card_decline_reason(df, card):
-    d = _declines(df)
-    d = _credit_list_remap(d)
-    d = _waterfall_filter(d)
-    d = d[d['cardtype'] == card]
-    pivot = d.groupby(['month', 'type'])['txns'].sum().unstack(fill_value=0)
-    total_card = df[df['cardtype'] == card].groupby('month')['txns'].sum()
-    rate = pivot.div(total_card, axis=0).mul(100).round(4)
-    return rate
-
-def _card_decline_reason_usd(df, card):
-    d = _declines(df)
-    d = _credit_list_remap(d)
-    d = _waterfall_filter(d)
-    d = d[d['cardtype'] == card]
-    pivot = d.groupby(['month', 'type'])['amt_usd'].sum().unstack(fill_value=0)
-    total_card = df[df['cardtype'] == card].groupby('month')['amt_usd'].sum()
-    rate = pivot.div(total_card, axis=0).mul(100).round(4)
-    return rate
-
-# CP/CNP decline waterfall
-def decline_cp_kpi(df):
-    d = _declines(df)
-    d = _credit_list_remap(d)
-    d = _waterfall_filter(d)
-    cp = d[d['CP_CNP'] == 'CP']
-    pivot = cp.groupby(['month', 'type'])['txns'].sum().unstack(fill_value=0)
-    return to_pct(pivot)
-
-def decline_cp_kpi_usd(df):
-    d = _declines(df)
-    d = _credit_list_remap(d)
-    d = _waterfall_filter(d)
-    cp = d[d['CP_CNP'] == 'CP']
-    pivot = cp.groupby(['month', 'type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_pct(pivot)
-
-def decline_cnp_kpi(df):
-    d = _declines(df)
-    d = _credit_list_remap(d)
-    d = _waterfall_filter(d)
-    cnp = d[d['CP_CNP'] == 'CNP']
-    pivot = cnp.groupby(['month', 'type'])['txns'].sum().unstack(fill_value=0)
-    return to_pct(pivot)
-
-def decline_cnp_kpi_usd(df):
-    d = _declines(df)
-    d = _credit_list_remap(d)
-    d = _waterfall_filter(d)
-    cnp = d[d['CP_CNP'] == 'CNP']
-    pivot = cnp.groupby(['month', 'type'])['amt_usd'].sum().unstack(fill_value=0)
-    return to_pct(pivot)
-
-# ─────────────────────────────────────────────
-# 3. COLOUR PALETTES  (match dashboard images)
-# ─────────────────────────────────────────────
-GREEN    = '#38D200'
-RED      = '#D50000'
-TEAL     = '#0473EA'
-TEAL2    = '#38D200'
-BLUE     = '#52DAFF'
-ORANGE   = '#020B43'
-PURPLE   = '#7D17F2'
-LIME     = '#05561C'
-CYAN     = '#F98764'
-DARK_TEAL= '#0473EA'
-GOLD     = '#FFC120'
-PINK     = '#82F028'
-GREY     = '#525355'
-
+# ── colours ────────────────────────────────────────────────────────────
+GREEN  = "#38D200"; RED    = "#D50000"; TEAL   = "#0473EA"
+BLUE   = "#52DAFF"; ORANGE = "#F98764"; NAVY   = "#020B43"
+LIME   = "#05561C"; GOLD   = "#FFC120"; PINK   = "#82F028"
+GREY   = "#525355"
 TYPE_COLORS = {
-    'Credit Related Decline': BLUE,
-    'FALCON_DECLINE':         ORANGE,
-    '_Other declines':        CYAN,
-    'STIP_DECLINE':           PINK,
+    "Credit Related Decline": BLUE,
+    "FALCON_DECLINE":         NAVY,
+    "_Other declines":        ORANGE,
+    "STIP_DECLINE":           PINK,
 }
 CRD_COLORS = {
-    'Insuff_Decline': TEAL,
-    'Credit_Line':    BLUE,
-    'Cash_Line':      LIME,
+    "Insuff_Decline": TEAL,
+    "Credit_Line":    BLUE,
+    "Cash_Line":      LIME,
 }
 CARD_COLORS = {
-    'CASHBACK':       '#52DAFF',
-    'INFINITE':       '#0473EA',
-    'MNH REWARDS PLUS':'#F98764',
-    'PLATINUM':       '#FFC120',
-    'SAADIQ':         '#82F028',
-    'X CASHBACK':     '#D50000',
+    "CASHBACK":         "#52DAFF",
+    "INFINITE":         "#0473EA",
+    "MNH REWARDS PLUS": "#F98764",
+    "PLATINUM":         "#FFC120",
+    "SAADIQ":           "#82F028",
+    "X CASHBACK":       "#D50000",
 }
-STIP_COLORS = {
-    'NONSTIPDEC':   ORANGE,
-    'STIPAPP':      ORANGE,
-    'STIPDEC':      BLUE,
-    'NONSTIPDEC ':  ORANGE,
-}
+CP_COLORS    = {"CP": "#0473EA", "CNP": "#F98764"}
+APPR_COLORS  = {"1.Approved": GREEN, "3.Declined": RED}
+OTHER_TYPES = [
+    "_Account closed or Expired card",
+    "_Allowable PIN tries exceeded",
+    "_Expiration Date Mismatch",
+    "_Incorrect Pin",
+    "_No such account",
+    "ATM_Decline",
+    "CVV_Decline",
+    "Exceeds withdrawal amount limit - CNP",
+    "Exceeds withdrawal amount limit - CP",
+    "Referral",
+]
+# ── helpers ────────────────────────────────────────────────────────────
+def _cols(df, cmap):
+    return [c for c in cmap if c in df.columns]
 
-APPROVE_COLORS = {
-    '1.Approved': GREEN,
-    '3.Declined': RED,
-}
-CP_COLORS = {
-    'CP':  '#0473EA',
-    'CNP': '#F98764',
-}
+def _pct(df):
+    df = df.fillna(0)
+    return df.div(df.sum(axis=1), axis=0).mul(100).round(4)
 
-# ─────────────────────────────────────────────
-# 4. MAIN EXECUTION
-# ─────────────────────────────────────────────
+def _page(pdf, fig, hspace=0.62, wspace=0.28):
+    plt.subplots_adjust(left=0.04, right=0.96, top=0.94,
+                        bottom=0.05, hspace=hspace, wspace=wspace)
+    pdf.savefig(fig, bbox_inches="tight")
+    plt.close(fig)
+
+def _title(fig, text):
+    fig.suptitle(text, fontsize=13, fontweight="bold", y=0.998,
+                 bbox=dict(boxstyle="round,pad=0.3",
+                           facecolor="#1C2B4A", alpha=0.92),
+                 color="white")
+
+# ════════════════════════════════════════════════════════════════════════
+# 1. LOAD DATA
+# ════════════════════════════════════════════════════════════════════════
+def load_data(path, sheet="Auth Decline Summary"):
+    df = pd.read_excel(path, sheet_name=sheet)
+    df.columns = df.columns.str.strip().str.lower()
+    rename = {c: c for c in df.columns}
+    for c in df.columns:
+        if c == "cp_cnp":      rename[c] = "CP_CNP"
+        elif c == "amt_usd":   rename[c] = "amt_usd"
+    df.rename(columns=rename, inplace=True)
+    df["month"] = pd.to_datetime(df["month"], format="%b-%y", errors="coerce")
+    bad = df["month"].isna()
+    if bad.any():
+        df.loc[bad, "month"] = pd.to_datetime(df.loc[bad, "month"], errors="coerce")
+    df = df.dropna(subset=["month"])
+    df = df[df["month"].dt.year == 2025].sort_values("month")
+    return df
+
+# ════════════════════════════════════════════════════════════════════════
+# 2. KPI FUNCTIONS
+# ════════════════════════════════════════════════════════════════════════
+def _dec(df):
+    return df[df["decisioning"].str.contains("declined", case=False, na=False)]
+
+def _remap_crd(df):
+    d = df.copy()
+    CRD = ["Insuff_Decline", "Cash_Line", "Credit_Line"]
+    d["type"] = d["type"].mask(d["type"].isin(CRD), "Credit Related Decline")
+    return d
+
+def _wf(df):
+    pat = "STIP_DECLINE|_Other declines|FALCON_DECLINE|Credit Related Decline"
+    return df[df["type"].str.contains(pat, case=False, na=False)]
+
+# overall
+def kpi_overall(df):
+    g = df.groupby(["month", "decisioning"])
+    vol     = g["txns"].sum().unstack(fill_value=0)
+    vol_usd = g["amt_usd"].sum().unstack(fill_value=0)
+    return vol, vol_usd, _pct(vol), _pct(vol_usd)
+
+# decline type waterfall
+def kpi_decline_type(df):
+    d   = _wf(_remap_crd(_dec(df)))
+    piv = d.groupby(["month","type"])["txns"].sum().unstack(fill_value=0)
+    usd = d.groupby(["month","type"])["amt_usd"].sum().unstack(fill_value=0)
+    tot = df.groupby("month")["txns"].sum()
+    tot_u = df.groupby("month")["amt_usd"].sum()
+    return (piv, usd,
+            piv.div(tot, axis=0).mul(100).round(4),
+            usd.div(tot_u, axis=0).mul(100).round(4),
+            _pct(piv), _pct(usd))
+
+# CRD
+def kpi_crd(df):
+    d = _dec(df)
+    c = d[d["type"].isin(["Insuff_Decline","Cash_Line","Credit_Line"])]
+    pt = c.groupby(["month","type"])["txns"].sum().unstack(fill_value=0)
+    pu = c.groupby(["month","type"])["amt_usd"].sum().unstack(fill_value=0)
+    tt = df.groupby("month")["txns"].sum()
+    tu = df.groupby("month")["amt_usd"].sum()
+    crd_t = c.groupby("month")["txns"].sum()
+    crd_u = c.groupby("month")["amt_usd"].sum()
+    return (_pct(pt), _pct(pu),
+            pt.div(tt,axis=0).mul(100).round(4),
+            pu.div(tu,axis=0).mul(100).round(4),
+            (crd_t/tt*100).round(4), (crd_u/tu*100).round(4),
+            (crd_t/_dec(df).groupby("month")["txns"].sum()*100).round(4),
+            (crd_u/_dec(df).groupby("month")["amt_usd"].sum()*100).round(4))
+
+# card type
+_EXCL = ["TITANIUM","TITANIUM2","WORLD"]
+def kpi_card_type(df):
+    d   = df[~df["cardtype"].isin(_EXCL)]
+    g   = d.groupby(["month","cardtype"])
+    gd  = _dec(d).groupby(["month","cardtype"])
+    vol = g["txns"].sum().unstack(fill_value=0)
+    vu  = g["amt_usd"].sum().unstack(fill_value=0)
+    dv  = gd["txns"].sum().unstack(fill_value=0)
+    du  = gd["amt_usd"].sum().unstack(fill_value=0)
+    return (_pct(vol), _pct(vu), vol, vu,
+            dv.div(vol).mul(100).round(4),
+            du.div(vu).mul(100).round(4))
+
+# per-card decline reason
+def kpi_card_reason(df, card):
+    d   = _wf(_remap_crd(_dec(df)))
+    d   = d[d["cardtype"] == card]
+    piv = d.groupby(["month","type"])["txns"].sum().unstack(fill_value=0)
+    pu  = d.groupby(["month","type"])["amt_usd"].sum().unstack(fill_value=0)
+    tt  = df[df["cardtype"]==card].groupby("month")["txns"].sum()
+    tu  = df[df["cardtype"]==card].groupby("month")["amt_usd"].sum()
+    return (piv.div(tt,axis=0).mul(100).round(4), piv,
+            pu.div(tu,axis=0).mul(100).round(4),  pu)
+
+# STIP
+def kpi_stip(df):
+    d  = _dec(df)
+    g  = d.groupby(["month","tag"])
+    vt = g["txns"].sum().unstack(fill_value=0)
+    vu = g["amt_usd"].sum().unstack(fill_value=0)
+    tt = df.groupby("month")["txns"].sum()
+    tu = df.groupby("month")["amt_usd"].sum()
+    return (_pct(vt), _pct(vu), vt, vu,
+            vt.div(tt,axis=0).mul(100).round(4),
+            vu.div(tu,axis=0).mul(100).round(4))
+
+# CP / CNP
+def kpi_cp_cnp(df):
+    g  = df.groupby(["month","CP_CNP"])
+    gd = _dec(df).groupby(["month","CP_CNP"])
+    vt = g["txns"].sum().unstack(fill_value=0)
+    vu = g["amt_usd"].sum().unstack(fill_value=0)
+    dv = gd["txns"].sum().unstack(fill_value=0)
+    du = gd["amt_usd"].sum().unstack(fill_value=0)
+    return (_pct(vt), _pct(vu), vt, vu,
+            dv.div(vt).mul(100).round(4),
+            du.div(vu).mul(100).round(4))
+
+def kpi_cp_wf(df, side):
+    d   = _wf(_remap_crd(_dec(df)))
+    d   = d[d["CP_CNP"] == side]
+    piv = d.groupby(["month","type"])["txns"].sum().unstack(fill_value=0)
+    pu  = d.groupby(["month","type"])["amt_usd"].sum().unstack(fill_value=0)
+    return _pct(piv), piv, _pct(pu), pu
+
+# other declines granular
+def kpi_other(df):
+    d   = _dec(df)
+    oth = d[d["type"].isin(OTHER_TYPES)]
+    pt  = oth.groupby(["month","type"])["txns"].sum().unstack(fill_value=0)
+    pu  = oth.groupby(["month","type"])["amt_usd"].sum().unstack(fill_value=0)
+    tt  = df.groupby("month")["txns"].sum()
+    tu  = df.groupby("month")["amt_usd"].sum()
+    dt  = d.groupby("month")["txns"].sum()
+    du  = d.groupby("month")["amt_usd"].sum()
+    return (pt.div(tt,axis=0).mul(100).round(4),
+            pu.div(tu,axis=0).mul(100).round(4),
+            pt.div(dt,axis=0).mul(100).round(4),
+            pu.div(du,axis=0).mul(100).round(4),
+            pt, pu)
+
+# ════════════════════════════════════════════════════════════════════════
+# 3. MAIN
+# ════════════════════════════════════════════════════════════════════════
 if __name__ == "__main__":
-    excel_path = r"C:\Users\2033240\test\AE_Auth_Decline_Summary.xlsx"
-    pdf_path   = r"C:\Users\2033240\test\AE_Auth_Decline_Summary_data.pdf"
+    EXCEL = r"C:\Users\2033240\test\AE_Auth_Decline_Summary.xlsx"
+    OUT   = r"C:\Users\2033240\test\AE_Auth_Decline_Summary_data.pdf"
 
-    df = load_data(excel_path)
+    print("Loading …")
+    df = load_data(EXCEL)
+    print(f"  {len(df):,} rows | {df['month'].nunique()} months")
 
-    # ── compute all KPIs ──────────────────────
-    kpi_pct     = approved_declined_kpi(df)
-    kpi_pct_usd = approved_declined_kpi_usd(df)
-    txn_dec     = transaction_decline_kpi(df)
-    txn_dec_usd = transaction_decline_kpi_usd(df)
+    # compute all KPIs
+    vol, vol_usd, pct, pct_usd              = kpi_overall(df)
+    dt_v,dt_u,dt_rate,dt_rate_u,dt_pct,dt_pct_u = kpi_decline_type(df)
+    (crd_dist,crd_dist_u,
+     crd_ptot,crd_ptot_u,
+     crd_of_tot,crd_of_tot_u,
+     crd_of_dec,crd_of_dec_u)               = kpi_crd(df)
+    ct_pct,ct_pct_u,ct_vol,ct_vol_u,ct_rate,ct_rate_u = kpi_card_type(df)
+    stip_pct,stip_pct_u,stip_vol,stip_vol_u,stip_rate,stip_rate_u = kpi_stip(df)
+    cp_pct,cp_pct_u,cp_vol,cp_vol_u,cp_rate,cp_rate_u = kpi_cp_cnp(df)
+    cp_wf,cp_wf_v,cp_wf_u,cp_wf_vu   = kpi_cp_wf(df,"CP")
+    cnp_wf,cnp_wf_v,cnp_wf_u,cnp_wf_vu = kpi_cp_wf(df,"CNP")
+    (oth_ptot,oth_ptot_u,
+     oth_pdec,oth_pdec_u,
+     oth_vol, oth_vol_u)                    = kpi_other(df)
 
-    cp_pct     = cp_cnp_kpi(df)
-    cp_pct_usd = cp_cnp_kpi_usd(df)
+    TOPN = 10
+    top  = oth_pdec.mean().nlargest(TOPN).index.tolist()
+    topu = oth_pdec_u.mean().nlargest(TOPN).index.tolist()
+    opal = _auto_colors(top)
+    opalu= _auto_colors(topu)
 
-    dec_type_abs, dec_type_rate, dec_type_pct      = decline_type_kpi(df)
-    dec_type_abs_usd, dec_type_rate_usd, dec_type_pct_usd = decline_type_kpi_usd(df)
+    print("Building PDF …")
+    with PdfPages(OUT) as pdf:
 
-    stip_pct     = stip_kpi(df)
-    stip_pct_usd = stip_kpi_usd(df)
-    stip_rate    = stip_rate_kpi(df)
-    stip_rate_usd= stip_rate_kpi_usd(df)
+        # ── PAGE 1 – Overall ────────────────────────────────────────
+        fig, axes = plt.subplots(4, 2, figsize=(24, 32))
+        _title(fig, "PAGE 1 - Overall Transactions & Decline Rate")
+        ax = axes.flatten()
+        dc  = _cols(pct, APPR_COLORS)
+        dcl = [APPR_COLORS[c] for c in dc]
+        dec_rate_s = pd.Series(dt_rate.sum(axis=1))
+        plot_stacked_bar_with_line(vol[dc], dec_rate_s,
+            "#Transaction & #Decline Rate", "", colors=dcl, ax=ax[0])
+        plot_stacked_bar_with_line(vol_usd[dc], dt_rate_u.sum(axis=1),
+            "$Transaction & $Decline Rate", "", colors=dcl, ax=ax[1])
+        plot_bar(pct[dc],     "Monthly Rate (#) - By Decision", "", colors=dcl, ax=ax[2])
+        plot_bar(pct_usd[dc], "Monthly Rate ($) - By Decision", "",         colors=dcl, ax=ax[3])
+        plot_table(pct[dc].T,         "",   ax=ax[4])
+        plot_table(pct_usd[dc].T,     "",   ax=ax[5])
+        plot_table_count(vol[dc].T,   "",   ax=ax[6])
+        plot_table_usd(vol_usd[dc].T, "", ax=ax[7])
+        _page(pdf, fig)
 
-    crd_dist, crd_pct_tot     = crd_granular_kpi(df)
-    crd_dist_usd, crd_pct_tot_usd = crd_granular_kpi_usd(df)
-    crd_of_total, crd_of_total_usd   = crd_pct_total(df)
-    crd_of_decline, crd_of_decline_usd = crd_pct_decline(df)
+        # ── PAGE 2 – Decline Type ───────────────────────────────────
+        fig, axes = plt.subplots(4, 2, figsize=(24, 32))
+        _title(fig, "PAGE 2 - Decline Rate - By Decline Type")
+        ax = axes.flatten()
+        tc  = _cols(dt_rate, TYPE_COLORS)
+        tcl = [TYPE_COLORS[c] for c in tc]
+        plot_line(dt_rate[tc],    "# Decline Rate - By Decline Type",    "# Overall Decline Rate",     colors=tcl, ax=ax[0])
+        plot_line(dt_rate_u[tc],  "$ Decline Rate - By Decline Type",    "$ Overall Decline Rate",     colors=tcl, ax=ax[1])
+        plot_bar(dt_pct[tc],      "# Decline Waterfall Distribution",         "", colors=tcl, ax=ax[2])
+        plot_bar(dt_pct_u[tc],    "$ Decline Waterfall Distribution",         "% of Total Decline $", colors=tcl, ax=ax[3])
+        plot_table(dt_rate[tc].T,   "", ax=ax[4])
+        plot_table(dt_rate_u[tc].T, "", ax=ax[5])
+        plot_table_count(dt_v[tc].T,  "",  ax=ax[6])
+        plot_table_usd(dt_u[tc].T,   "", ax=ax[7])
+        _page(pdf, fig)
 
-    ct_pct     = card_type_kpi(df)
-    ct_pct_usd = card_type_kpi_usd(df)
-    ct_rate     = decline_rate_by_cardtype(df)
-    ct_rate_usd = decline_rate_by_cardtype_usd(df)
+        # ── PAGE 3 – CRD ────────────────────────────────────────────
+        fig, axes = plt.subplots(4, 2, figsize=(24, 32))
+        _title(fig, "PAGE 3 - Credit Related Decline (CRD) - Distribution")
+        ax = axes.flatten()
+        cc  = _cols(crd_dist, CRD_COLORS)
+        ccl = [CRD_COLORS[c] for c in cc]
+        tot_line = pd.DataFrame({"CRD % of Total #": crd_of_tot,
+                                  "CRD % of Total $": crd_of_tot_u})
+        dec_line = pd.DataFrame({"CRD % of Decline #": crd_of_dec,
+                                  "CRD % of Decline $": crd_of_dec_u})
+        plot_line(tot_line, "CRD Granular - % of Total #",   "",   colors=[ORANGE,TEAL], ax=ax[0])
+        plot_line(dec_line, "CRD Granular - % of Total $", "",colors=[BLUE,RED],    ax=ax[1])
+        plot_bar(crd_dist[cc],   "CRD Granular - # Distribution", "", colors=ccl, ax=ax[2])
+        plot_bar(crd_dist_u[cc], "CRD Granular - $ Distribution", "% of Total Decline $", colors=ccl, ax=ax[3])
+        plot_table(crd_ptot[cc].T,    "",   ax=ax[4])
+        plot_table(crd_ptot_u[cc].T,  "",   ax=ax[5])
+        plot_table(tot_line.T,        "",        ax=ax[6])
+        plot_table(dec_line.T,        "",      ax=ax[7])
+        _page(pdf, fig)
 
-    wf_pct     = dec_type_pct
-    wf_pct_usd = dec_type_pct_usd
+        # ── PAGE 4 – Card Type ──────────────────────────────────────
+        fig, axes = plt.subplots(4, 2, figsize=(24, 32))
+        _title(fig, "PAGE 4 │ # and $ Distribution - By Card Type")
+        ax = axes.flatten()
+        ctc = _cols(ct_pct, CARD_COLORS)
+        ctl = [CARD_COLORS[c] for c in ctc]
+        plot_bar(ct_pct[ctc],     "# Distribution - By Card Type", "% of Total Txns", colors=ctl, ax=ax[0])
+        plot_bar(ct_pct_u[ctc],   "$ Distribution - By Card Type", "% of Total Amt Usd", colors=ctl, ax=ax[1])
+        plot_line(ct_rate[ctc],   "# Decline Rate - By Card",      "# Decline Rate", colors=ctl, ax=ax[2])
+        plot_line(ct_rate_u[ctc], "$ Decline Rate - By Card",      "$ Decline Rate", colors=ctl, ax=ax[3])
+        plot_table(ct_pct[ctc].T,     "", ax=ax[4])
+        plot_table(ct_pct_u[ctc].T,   "", ax=ax[5])
+        plot_table_count(ct_vol[ctc].T,   "",  ax=ax[6])
+        plot_table_usd(ct_vol_u[ctc].T,   "",ax=ax[7])
+        _page(pdf, fig)
 
-    cp_wf_pct     = decline_cp_kpi(df)
-    cp_wf_pct_usd = decline_cp_kpi_usd(df)
-    cnp_wf_pct    = decline_cnp_kpi(df)
-    cnp_wf_pct_usd= decline_cnp_kpi_usd(df)
+        # -- PAGES 5-10 - One dedicated page per card ----------------------
+        # Each card gets its own page:
+        #   Row 0: [# Rate line chart]     [$ Rate line chart]
+        #   Row 1: [# Rate % table]        [$ Rate % table]
+        #   Row 2: [# Vol K/M table]       [$ Vol $K/$M table]
+        CARDS = ["PLATINUM","INFINITE","CASHBACK","MNH REWARDS PLUS","SAADIQ","X CASHBACK"]
+        for pg_num, card in enumerate(CARDS, start=5):
+            if card not in df["cardtype"].unique():
+                continue
+            fig, axes = plt.subplots(3, 2, figsize=(24, 32))
+            _title(fig, f"PAGE {pg_num} - {card} Card")
+            ax = axes.flatten()   # 6 slots
 
-    CARDS = ['PLATINUM', 'INFINITE', 'CASHBACK', 'MNH REWARDS PLUS', 'SAADIQ', 'X CASHBACK']
+            r, rv, ru, rvu = kpi_card_reason(df, card)
+            t2  = _cols(r,  TYPE_COLORS); tl2  = [TYPE_COLORS[c] for c in t2]
+            t2u = _cols(ru, TYPE_COLORS); tl2u = [TYPE_COLORS[c] for c in t2u]
 
-    # ── PDF ───────────────────────────────────
-    with PdfPages(pdf_path) as pdf:
+            # row 0: rate line chart
+            plot_line(r[t2],   f" {card} Card", "# Overall Decline Rate", colors=tl2,  ax=ax[0])
+            plot_line(ru[t2u], f" {card} Card", "$ Decline Rate", colors=tl2u, ax=ax[1])
+            # row 1: % rate tables (fill axes)
+            plot_table(r[t2].T,   "",  ax=ax[2])
+            plot_table(ru[t2u].T, "",  ax=ax[3])
+            # row 2: volume tables (fill axes)
+            plot_table_count(rv[t2].T,   "",   ax=ax[4])
+            plot_table_usd(rvu[t2u].T,   "", ax=ax[5])
 
-        # ══════════════════════════════════════
-        # PAGE 1 – Overall Transactions & Decline Rate
-        # ══════════════════════════════════════
-        fig, axes = plt.subplots(3, 2, figsize=(22, 26))
-        axes = axes.flatten()
-        fig.suptitle("Credit Card Decline Dashboard – Overall", fontsize=16, fontweight='bold', y=0.99)
-
-        cols = [c for c in ['1.Approved', '3.Declined'] if c in kpi_pct.columns]
-        plot_stacked_bar_with_line(
-            txn_dec[cols], dec_type_rate.sum(axis=1),
-            "#Transaction & #Decline Rate", "# Transactions",
-            colors=[GREEN, RED], ax=axes[0])
-        plot_stacked_bar_with_line(
-            txn_dec_usd[cols], dec_type_rate_usd.sum(axis=1),
-            "$Transaction & $Decline Rate", "$ Transactions",
-            colors=[GREEN, RED], ax=axes[1])
-        plot_bar(kpi_pct[cols], "Monthly Rate (#) - By Decision", "% of Transactions",
-                 colors=[GREEN, RED], ax=axes[2])
-        plot_bar(kpi_pct_usd[cols], "Monthly Rate ($) - By Decision", "% of $",
-                 colors=[GREEN, RED], ax=axes[3])
-        plot_table(kpi_pct[cols], "Monthly Rate (#) - By Decision", percent=True, ax=axes[4])
-        plot_table(kpi_pct_usd[cols], "Monthly Rate ($) - By Decision", percent=True, ax=axes[5])
-
-        plt.subplots_adjust(left=0.05, right=0.97, top=0.95, bottom=0.05, hspace=0.55, wspace=0.30)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
-
-        # ══════════════════════════════════════
-        # PAGE 2 – Decline Rate by Decline Type
-        # ══════════════════════════════════════
-        fig, axes = plt.subplots(3, 2, figsize=(22, 26))
-        axes = axes.flatten()
-        fig.suptitle("Decline Rate – By Decline Type", fontsize=16, fontweight='bold', y=0.99)
-
-        type_cols  = [c for c in TYPE_COLORS if c in dec_type_rate.columns]
-        type_colors_list = [TYPE_COLORS[c] for c in type_cols]
-
-        plot_line(dec_type_rate[type_cols],   "# Decline Rate - By Decline Type",   "% Decline Rate",
-                  colors=type_colors_list, percent=True, ax=axes[0])
-        plot_line(dec_type_rate_usd[type_cols], "$ Decline Rate - By Decline Type", "% $ Decline Rate",
-                  colors=type_colors_list, percent=True, ax=axes[1])
-        plot_bar(dec_type_pct[type_cols],     "# Decline Waterfall Distribution",   "% of Decline #",
-                 colors=type_colors_list, ax=axes[2])
-        plot_bar(dec_type_pct_usd[type_cols], "$ Decline Waterfall Distribution",   "% of Decline $",
-                 colors=type_colors_list, ax=axes[3])
-        plot_table(dec_type_rate[type_cols],  "# Decline Rate - By Decline Type",   percent=True, ax=axes[4])
-        plot_table(dec_type_rate_usd[type_cols], "$ Decline Rate - By Decline Type", percent=True, ax=axes[5])
-
-        plt.subplots_adjust(left=0.05, right=0.97, top=0.95, bottom=0.05, hspace=0.55, wspace=0.30)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
-
-        # ══════════════════════════════════════
-        # PAGE 3 – Credit Related Decline
-        # ══════════════════════════════════════
-        fig, axes = plt.subplots(3, 2, figsize=(22, 26))
-        axes = axes.flatten()
-        fig.suptitle("Credit Related Decline Analysis", fontsize=16, fontweight='bold', y=0.99)
-
-        # top: dual series line – % of total vs % of decline
-        plot_line(pd.DataFrame({'CRD % of #': crd_of_total, 'CRD % of $': crd_of_total_usd}),
-                  "Credit Related Decline - % of Total", "% of Total",
-                  colors=[ORANGE, TEAL], percent=True, ax=axes[0])
-        plot_line(pd.DataFrame({'CRD % of Decline #': crd_of_decline, 'CRD % of Decline $': crd_of_decline_usd}),
-                  "Credit Related Decline - % of Decline", "% of Decline",
-                  colors=[BLUE, RED], percent=True, ax=axes[1])
-
-        crd_cols = [c for c in CRD_COLORS if c in crd_dist.columns]
-        crd_colors_list = [CRD_COLORS[c] for c in crd_cols]
-        plot_bar(crd_dist[crd_cols], "CRD Granular - # Distribution", "% of CRD #",
-                 colors=crd_colors_list, ax=axes[2])
-        plot_bar(crd_dist_usd[crd_cols], "CRD Granular - $ Distribution", "% of CRD $",
-                 colors=crd_colors_list, ax=axes[3])
-        plot_table(crd_pct_tot[crd_cols], "CRD Granular - % of Total #", percent=True, ax=axes[4])
-        plot_table(crd_pct_tot_usd[crd_cols], "CRD Granular - % of Total $", percent=True, ax=axes[5])
-
-        plt.subplots_adjust(left=0.05, right=0.97, top=0.95, bottom=0.05, hspace=0.55, wspace=0.30)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
-
-        # ══════════════════════════════════════
-        # PAGE 4 – Card Type Distribution
-        # ══════════════════════════════════════
-        fig, axes = plt.subplots(3, 2, figsize=(22, 26))
-        axes = axes.flatten()
-        fig.suptitle("# and $ Distribution – By Card Type", fontsize=16, fontweight='bold', y=0.99)
-
-        ct_cols  = [c for c in CARD_COLORS if c in ct_pct.columns]
-        ct_cl    = [CARD_COLORS[c] for c in ct_cols]
-
-        plot_bar(ct_pct[ct_cols],     "# Distribution - By Card Type", "% of #",
-                 colors=ct_cl, ax=axes[0])
-        plot_bar(ct_pct_usd[ct_cols], "$ Distribution - By Card Type", "% of $",
-                 colors=ct_cl, ax=axes[1])
-        plot_line(ct_rate[ct_cols],   "# Decline Rate - By Card Type (Overall)", "% Decline Rate",
-                  colors=ct_cl, percent=True, ax=axes[2])
-        plot_line(ct_rate_usd[ct_cols], "$ Decline Rate - By Card Type (Overall)", "% $ Decline Rate",
-                  colors=ct_cl, percent=True, ax=axes[3])
-        plot_table(ct_pct[ct_cols],   "# Distribution - By Card Type", percent=True, ax=axes[4])
-        plot_table(ct_pct_usd[ct_cols], "$ Distribution - By Card Type", percent=True, ax=axes[5])
-
-        plt.subplots_adjust(left=0.05, right=0.97, top=0.95, bottom=0.05, hspace=0.55, wspace=0.30)
-        pdf.savefig(fig, bbox_inches='tight')
-        plt.close(fig)
-
-        # ══════════════════════════════════════
-        # PAGE 5 – Per Card Decline Reason (Platinum & Infinite)
-        # ══════════════════════════════════════
-        for card_pair in [('PLATINUM', 'INFINITE'), ('CASHBACK', 'MNH REWARDS PLUS'),
-                          ('SAADIQ', 'X CASHBACK')]:
-            fig, axes = plt.subplots(4, 2, figsize=(22, 30))
-            axes = axes.flatten()
-            for i, card in enumerate(card_pair):
-                if card not in df['cardtype'].unique():
-                    for j in range(4):
-                        axes[i + j*2].axis('off')
-                    continue
-                rate     = _card_decline_reason(df, card)
-                rate_usd = _card_decline_reason_usd(df, card)
-                tc  = [c for c in TYPE_COLORS if c in rate.columns]
-                tcl = [TYPE_COLORS[c] for c in tc]
-
-                fig.text(0.5, 0.98 - i * 0.49,
-                         f"{card} Card", ha='center', fontsize=13, fontweight='bold')
-                plot_line(rate[tc],     f"# Decline Rate – {card}", "% Decline Rate",
-                          colors=tcl, percent=True, ax=axes[i * 2])
-                plot_line(rate_usd[tc], f"$ Decline Rate – {card}", "% $ Decline Rate",
-                          colors=tcl, percent=True, ax=axes[i * 2 + 1])
-                plot_table(rate[tc],    f"# Decline Rate – {card}", percent=True,
-                           ax=axes[(i + 2) * 2])
-                plot_table(rate_usd[tc],f"$ Decline Rate – {card}", percent=True,
-                           ax=axes[(i + 2) * 2 + 1])
-
-            fig.suptitle(f"Decline by Card – {' & '.join(card_pair)}",
-                         fontsize=16, fontweight='bold', y=0.995)
-            plt.subplots_adjust(left=0.05, right=0.97, top=0.96, bottom=0.04, hspace=0.55, wspace=0.30)
-            pdf.savefig(fig, bbox_inches='tight')
+            plt.subplots_adjust(left=0.04, right=0.96, top=0.95,
+                                bottom=0.03, hspace=0.55, wspace=0.28)
+            pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
 
-        # ══════════════════════════════════════
-        # PAGE 9 – STIP vs Non-STIP
-        # ══════════════════════════════════════
-        fig, axes = plt.subplots(3, 2, figsize=(22, 26))
-        axes = axes.flatten()
-        fig.suptitle("STIP vs Non-STIP Analysis", fontsize=16, fontweight='bold', y=0.99)
+        # ── PAGE 8 – STIP ────────────────────────────────────────────
+        fig, axes = plt.subplots(4, 2, figsize=(24, 32))
+        _title(fig, "PAGE 11 - STIP vs Non-STIP Declines")
+        ax = axes.flatten()
+        sc  = list(stip_pct.columns)
+        scl = [BLUE if ("STIP" in c.upper() and "NON" not in c.upper()) else ORANGE for c in sc]
+        plot_bar(stip_pct[sc],     "Decline Distribution (# and $) - By STIP/Non-STIP",  "% of Decline Transactions", colors=scl, ax=ax[0])
+        plot_bar(stip_pct_u[sc],   "Decline Distribution (# and $) - By STIP/Non-STIP",  "% of Decline $", colors=scl, ax=ax[1])
+        plot_line(stip_rate[sc],   "Decline Rate (#) - By STIP/Non-STIP",  "Decline Rate (#)",     colors=scl, ax=ax[2])
+        plot_line(stip_rate_u[sc], "Decline Rate ($) - By STIP/Non-STIP",  "Decline Rate ($)",     colors=scl, ax=ax[3])
+        plot_table(stip_pct[sc].T,     "",     ax=ax[4])
+        plot_table(stip_pct_u[sc].T,   "",     ax=ax[5])
+        plot_table_count(stip_vol[sc].T,   "",    ax=ax[6])
+        plot_table_usd(stip_vol_u[sc].T,   "",  ax=ax[7])
+        _page(pdf, fig)
 
-        stip_cols  = [c for c in stip_pct.columns]
-        stip_cl    = [ORANGE if 'NON' in c.upper() else BLUE for c in stip_cols]
+        # ── PAGE 9 – CP / CNP ────────────────────────────────────────
+        fig, axes = plt.subplots(4, 2, figsize=(24, 32))
+        _title(fig, "PAGE 12 - Card Present vs Card Not Present")
+        ax = axes.flatten()
+        cc2 = [c for c in cp_pct.columns if c != "Total"]
+        ccl2= [CP_COLORS.get(c, GREY) for c in cc2]
+        tc3 = _cols(cp_wf,  TYPE_COLORS); tl3  = [TYPE_COLORS[c] for c in tc3]
+        tc4 = _cols(cnp_wf, TYPE_COLORS); tl4  = [TYPE_COLORS[c] for c in tc4]
+        plot_bar(cp_pct[cc2],    "Monthly Rate (#) CP/CNP",      "% of Transaction",   colors=ccl2, ax=ax[0])
+        plot_bar(cp_pct_u[cc2],  "Monthly Rate ($) CP/CNP",      "% of $",    colors=ccl2, ax=ax[1])
+        plot_bar(cp_wf[tc3],     "# Decline Waterfall - CP",     "Decline Rate (#)", colors=tl3,  ax=ax[2])
+        plot_bar(cnp_wf[tc4],    "# Decline Waterfall - CNP",    "Decline Rate ($)",colors=tl4,  ax=ax[3])
+        plot_table(cp_pct[cc2].T,    "",    ax=ax[4])
+        plot_table(cp_pct_u[cc2].T,  "",    ax=ax[5])
+        plot_table_count(cp_vol[cc2].T,   "",  ax=ax[6])
+        plot_table_usd(cp_vol_u[cc2].T,   "",ax=ax[7])
+        _page(pdf, fig)
 
-        plot_bar(stip_pct[stip_cols],     "Monthly Rate (#) - By STIP/Non-STIP", "% of Decline #",
-                 colors=stip_cl, ax=axes[0])
-        plot_bar(stip_pct_usd[stip_cols], "Monthly Rate ($) - By STIP/Non-STIP", "% of Decline $",
-                 colors=stip_cl, ax=axes[1])
-        plot_line(stip_rate[stip_cols],   "Decline Rate (#) - By STIP/Non-STIP", "% Decline Rate",
-                  colors=stip_cl, percent=True, ax=axes[2])
-        plot_line(stip_rate_usd[stip_cols],"Decline Rate ($) - By STIP/Non-STIP","% $ Decline Rate",
-                  colors=stip_cl, percent=True, ax=axes[3])
-        plot_table(stip_pct[stip_cols],   "Monthly Rate (#) - By STIP/Non-STIP", percent=True, ax=axes[4])
-        plot_table(stip_pct_usd[stip_cols],"Monthly Rate ($) - By STIP/Non-STIP", percent=True, ax=axes[5])
+        # ── PAGE 10 – Other Declines: Line Trends ────────────────────
+        import matplotlib.gridspec as gridspec
+        fig = plt.figure(figsize=(24, 32))
+        _title(fig, "PAGE 13 - Other Declines Granular and card Type - Declines")
+        gs = gridspec.GridSpec(4, 2, figure=fig,
+                               left=0.04, right=0.96, top=0.96, bottom=0.01,
+                               hspace=0.45, wspace=0.65)
+        ax0 = fig.add_subplot(gs[0, 0])
+        ax1 = fig.add_subplot(gs[0, 1])
+        ax2 = fig.add_subplot(gs[1, 0])
+        ax3 = fig.add_subplot(gs[1, 1])
+        ax4 = fig.add_subplot(gs[2, 0])
+        ax5 = fig.add_subplot(gs[2, 1])
+        ax6 = fig.add_subplot(gs[3, 0])
+        ax7 = fig.add_subplot(gs[3, 1])
 
-        plt.subplots_adjust(left=0.05, right=0.97, top=0.95, bottom=0.05, hspace=0.55, wspace=0.30)
-        pdf.savefig(fig, bbox_inches='tight')
+        plot_line(oth_ptot[top],    "Other Declines - % of Total #",   "",   colors=opal,  ax=ax0)
+        plot_line(oth_ptot_u[topu], "Other Declines - % of Total $",   "",   colors=opalu, ax=ax1)
+        plot_line(oth_pdec[top],    "Other Declines - % of Decline #", "",   colors=opal,  ax=ax2)
+        plot_line(oth_pdec_u[topu], "Other Declines - % of Decline $", "",   colors=opalu, ax=ax3)
+        plot_line(cp_pct[cc2],    "Decline Rate (# and $) - By Decline Reason - CP",      "Decline Rate (#)",   colors=ccl2, ax=ax4)
+        plot_line(cp_pct_u[cc2],  "Decline Rate (# and $) - By Decline Reason - CP",      "Decline Rate ($)",    colors=ccl2, ax=ax5)
+        plot_line(cp_wf[tc3],     "Decline Rate (# and $) - By Decline Reason - CNP",     "Decline Rate (#)", colors=tl3,  ax=ax6)
+        plot_line(cnp_wf[tc4],    "Decline Rate (# and $) - By Decline Reason - CNP",    "Decline Rate ($)",colors=tl4,  ax=ax7)
+        # Override legend to be INSIDE each axes — guaranteed always visible
+        for axi in [ax0, ax1, ax2, ax3]:
+            if hasattr(axi, '_legend_handles'):
+                axi.get_legend().remove()          # remove the outside legend
+                axi.legend(
+                    axi._legend_handles,
+                    axi._legend_labels,
+                    loc="upper right",             # inside top-right of chart
+                    ncol=1,
+                    fontsize=6.5,
+                    frameon=True,
+                    framealpha=0.88,
+                    fancybox=True,
+                    borderpad=0.5,
+                    labelspacing=0.25,
+                )
+
+        pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
-        # ══════════════════════════════════════
-        # PAGE 10 – Card Present vs Card Not Present
-        # ══════════════════════════════════════
-        fig, axes = plt.subplots(3, 2, figsize=(22, 26))
-        axes = axes.flatten()
-        fig.suptitle("Card Present vs Card Not Present", fontsize=16, fontweight='bold', y=0.99)
+        # -- PAGE 16 - Other Declines: All Tables ---------------------------
+        # GridSpec layout: 4 rows x 2 cols, last row summary spans full width.
+        # Tall figure + generous hspace prevents any table overlap.
+        import matplotlib.gridspec as gridspec
+        fig = plt.figure(figsize=(24,32))
+        _title(fig, "PAGE 14 - Other Declines Granular - All Tables")
+        gs = gridspec.GridSpec(3, 2, figure=fig,
+                               left=0.04, right=0.96, top=0.96, bottom=0.01,
+                               hspace=0.45, wspace=0.65)
+        ax0 = fig.add_subplot(gs[0, 0])
+        ax1 = fig.add_subplot(gs[0, 1])
+        ax2 = fig.add_subplot(gs[1, 0])
+        ax3 = fig.add_subplot(gs[1, 1])
+        ax4 = fig.add_subplot(gs[2, 0])
+        ax5 = fig.add_subplot(gs[2, 1])
+        #ax6 = fig.add_subplot(gs[3, :])   # summary spans full width
 
-        cp_cols  = [c for c in cp_pct.columns if c != 'Total']
-        cp_cl    = [CP_COLORS.get(c, GREY) for c in cp_cols]
-
-        plot_bar(cp_pct[cp_cols],     "Monthly Rate (#) - By CP/CNP", "% of Transactions",
-                 colors=cp_cl, ax=axes[0])
-        plot_bar(cp_pct_usd[cp_cols], "Monthly Rate ($) - By CP/CNP", "% of $",
-                 colors=cp_cl, ax=axes[1])
-
-        # Decline waterfall CP vs CNP
-        cp_tc   = [c for c in TYPE_COLORS if c in cp_wf_pct.columns]
-        cp_tcl  = [TYPE_COLORS[c] for c in cp_tc]
-        cnp_tc  = [c for c in TYPE_COLORS if c in cnp_wf_pct.columns]
-        cnp_tcl = [TYPE_COLORS[c] for c in cnp_tc]
-
-        plot_bar(cp_wf_pct[cp_tc],    "# Decline Waterfall – CP", "% of CP Decline #",
-                 colors=cp_tcl, ax=axes[2])
-        plot_bar(cnp_wf_pct[cnp_tc],  "# Decline Waterfall – CNP","% of CNP Decline #",
-                 colors=cnp_tcl, ax=axes[3])
-        plot_table(cp_pct[cp_cols],   "Monthly Rate (#) - By CP/CNP", percent=True, ax=axes[4])
-        plot_table(cp_pct_usd[cp_cols],"Monthly Rate ($) - By CP/CNP", percent=True, ax=axes[5])
-
-        plt.subplots_adjust(left=0.05, right=0.97, top=0.95, bottom=0.05, hspace=0.55, wspace=0.30)
-        pdf.savefig(fig, bbox_inches='tight')
+        plot_table(oth_ptot[top].T,    "% of Total #",    ax=ax0)
+        plot_table(oth_ptot_u[topu].T, "% of Total $",    ax=ax1)
+        plot_table(oth_pdec[top].T,    "% of Decline #",  ax=ax2)
+        plot_table(oth_pdec_u[topu].T, "% of Decline $",  ax=ax3)
+        plot_table_count(oth_vol[top].T,   "",   ax=ax4)
+        plot_table_usd(oth_vol_u[topu].T,  "", ax=ax5)
+        
+        
+        smry = pd.DataFrame({
+            "Tot %#": oth_ptot[top].sum(axis=1),
+            "Tot %$": oth_ptot_u[topu].sum(axis=1),
+            "Dec %#": oth_pdec[top].sum(axis=1),
+            "Dec %$": oth_pdec_u[topu].sum(axis=1),
+        })
+        #plot_table(smry.T, "Combined Summary (%)", ax=ax6)
+        pdf.savefig(fig, bbox_inches="tight")
         plt.close(fig)
 
-    print(f"✅  PDF saved → {pdf_path}")
+    print(f"✅  Saved → {OUT}")
+
+
+
+
+
+
+"""
+charts.py  -  AE Auth Decline Dashboard
+Tables are now colourless: white background, black text, light grey borders.
+"""
 import matplotlib
-matplotlib.use('Agg')   # non-interactive backend (safe for PDF generation)
-
+matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
+import matplotlib.cm as cm
+import matplotlib.colors as mcolors
 import pandas as pd
 import numpy as np
 
-# ─────────────────────────────────────────────────────────────
-# COLOUR PALETTE  (matches the dashboard screenshots)
-# ─────────────────────────────────────────────────────────────
-_PALETTE = [
-    '#7D17F2',   # deep blue
-    '#FFC120',   # amber / orange
-    '#0473EA',   # cyan
-    '#D50000',   # pink / magenta
-    '#82F028',   # dark green
-    '#7D17F2',   # purple
-    '#52DAFF',   # gold
-    '#05561C',   # dark teal
-    '#F98764',   # dark orange-red
-    '#001E8C',   # indigo
+_PAL = [
+    "#0473EA","#FFC120","#D50000","#38D200","#7D17F2",
+    "#F98764","#52DAFF","#05561C","#020B43","#82F028",
+    "#FF6B9D","#00C9A7","#FF8C00","#9B59B6","#1ABC9C",
+    "#E74C3C","#3498DB","#F39C12","#2ECC71","#E67E22",
 ]
-
-GREEN  = '#38D200'
-RED    = '#D50000'
-
+GREEN = "#38D200"
+RED   = "#D50000"
 
 def _month_labels(index):
-    """Return 'Jan-25' style labels from a DatetimeIndex or plain index."""
     try:
-        return [pd.Timestamp(d).strftime('%b-%y') for d in index]
+        return [pd.Timestamp(d).strftime("%b-%y") for d in index]
     except Exception:
         return [str(d) for d in index]
 
-
-def _color_list(df, colors=None):
+def _cl(df, colors=None):
     n = len(df.columns)
     if colors and len(colors) >= n:
         return list(colors[:n])
-    return (_PALETTE * ((n // len(_PALETTE)) + 1))[:n]
+    return (_PAL * ((n // len(_PAL)) + 1))[:n]
 
+def _fmt_num(v):
+    try: 
+        v = float(v)
+    except: 
+        return str(v)
+    return f"{v/1_000:.2f}K"
 
-# ─────────────────────────────────────────────────────────────
-# STACKED BAR  (with optional % labels inside each segment)
-# ─────────────────────────────────────────────────────────────
-def plot_bar(df_plot, title, ylabel, colors=None, percent=True, ax=None):
-    """
-    Stacked bar chart.
-    percent=True  → y-axis 0-100 %, labels shown as '12.34%'
-    percent=False → raw values, labels formatted with K/M suffix
-    """
+def _fmt_usd(v):
+    try:
+        v = float(v)
+    except: 
+        return str(v)
+    return f"${v/1_000_000:.2f}M"
+
+def _auto_colors(columns):
+    n = len(columns)
+    return [mcolors.to_hex(cm.tab20(i / max(n-1, 1))) for i in range(n)]
+
+# =============================================================================
+# CORE TABLE RENDERER  –  colourless
+# =============================================================================
+def _render_table(ax, cell_text, col_labels, row_labels, title):
+    n_rows = len(row_labels)
+    n_cols = len(col_labels)
+
+    fontsize = max(10.0, 16.0 - n_rows * 0.9)
+
+    tbl = ax.table(
+        cellText  = cell_text,
+        rowLabels = row_labels,
+        colLabels = col_labels,
+        loc       = "center",
+        cellLoc   = "center",
+        bbox      = [0.0, 0.0, 1.0, 1.0],
+    )
+    tbl.auto_set_font_size(False)
+    tbl.set_fontsize(fontsize)
+
+    row_h = max(4.0, 18.0 / (n_rows + 1))
+    tbl.scale(1.4, row_h)
+
+    BORDER = "#AAAAAA"
+    BG     = "#FFFFFF"
+    FG     = "#000000"
+
+    # ── Header row ────────────────────────────────────────────────────────
+    for j in range(n_cols):
+        c = tbl[0, j]
+        c.set_facecolor(BG)
+        c.set_edgecolor(BORDER)
+        c.set_text_props(color=FG, fontweight="bold")
+
+    # ── Row label column ──────────────────────────────────────────────────
+    for i in range(1, n_rows + 1):
+        c = tbl[i, -1]
+        c.set_facecolor(BG)
+        c.set_edgecolor(BORDER)
+        c.set_text_props(color=FG, fontweight="bold")
+
+    # ── Data cells ────────────────────────────────────────────────────────
+    for i in range(1, n_rows + 1):
+        for j in range(n_cols):
+            c = tbl[i, j]
+            c.set_facecolor(BG)
+            c.set_edgecolor(BORDER)
+            c.set_text_props(color=FG)
+
+    ax.set_title(title, fontsize=fontsize + 2, fontweight="bold",
+                 pad=10, color="#1C2B4A")
+    return tbl
+
+# =============================================================================
+# PUBLIC TABLE FUNCTIONS
+# =============================================================================
+def plot_table(df_plot, title, percent=True, ax=None):
     if ax is None:
-        _, ax = plt.subplots(figsize=(14, 7))
-
-    df = df_plot.copy().fillna(0)
-    labels = _month_labels(df.index)
-    cl = _color_list(df, colors)
-
-    x = np.arange(len(labels))
-    width = 0.55
-    bottoms = np.zeros(len(labels))
-
-    bars_info = []
-    for i, col in enumerate(df.columns):
-        vals = df[col].values.astype(float)
-        bars = ax.bar(x, vals, width, bottom=bottoms, color=cl[i], label=col)
-        bars_info.append((vals, bottoms.copy(), cl[i]))
-        bottoms += vals
-
-    # --- labels inside bars ---
-    for vals, bot, _ in bars_info:
-        for xi, (v, b) in enumerate(zip(vals, bot)):
-            if v > 2.5:   # skip tiny slivers
-                txt = f"{v:.2f}%" if percent else _fmt_num(v)
-                ax.text(xi, b + v / 2, txt,
-                        ha='center', va='center',
-                        fontsize=7, color='white', fontweight='bold',
-                        clip_on=True)
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
-    ax.set_title(title, fontsize=10, fontweight='bold', pad=6)
-    ax.set_xlabel("Month", fontsize=8)
-    ax.set_ylabel(ylabel, fontsize=8)
-
-    if percent:
-        ax.set_ylim(0, 105)
-        ax.yaxis.set_major_formatter(mticker.PercentFormatter())
-    else:
-        ax.yaxis.set_major_formatter(mticker.FuncFormatter(
-            lambda v, _: _fmt_num(v)))
-
-    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.28),
-              ncol=min(len(df.columns), 5), frameon=False, fontsize=8)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+        _, ax = plt.subplots(figsize=(22, 5))
+    ax.axis("off")
+    df  = df_plot.copy().fillna(0)
+    col = _month_labels(df.columns)
+    row = list(df.index)
+    txt = [[f"{float(v):.2f}%" for v in r] for r in df.values] if percent \
+          else [[_fmt_num(v) for v in r] for r in df.values]
+    _render_table(ax, txt, col, row, title)
     return ax
 
+def plot_table_count(df_plot, title, ax=None):
+    if ax is None:
+        _, ax = plt.subplots(figsize=(22, 5))
+    ax.axis("off")
+    df  = df_plot.copy().fillna(0)
+    col = _month_labels(df.columns)
+    row = list(df.index)
+    txt = [[_fmt_num(v) for v in r] for r in df.values]
+    _render_table(ax, txt, col, row, title)
+    return ax
 
-# ─────────────────────────────────────────────────────────────
+def plot_table_usd(df_plot, title, ax=None):
+    if ax is None:
+        _, ax = plt.subplots(figsize=(22, 5))
+    ax.axis("off")
+    df  = df_plot.copy().fillna(0)
+    col = _month_labels(df.columns)
+    row = list(df.index)
+    txt = [[_fmt_usd(v) for v in r] for r in df.values]
+    _render_table(ax, txt, col, row, title)
+    return ax
+
+# Kept for API compatibility
+plot_table_large       = plot_table
+plot_table_count_large = plot_table_count
+plot_table_usd_large   = plot_table_usd
+
+# =============================================================================
+# STACKED BAR CHART
+# =============================================================================
+def plot_bar(df_plot, title, ylabel, colors=None, percent=True, ax=None):
+    if ax is None:
+        _, ax = plt.subplots(figsize=(14, 7))
+    df  = df_plot.copy().fillna(0)
+    lbl = _month_labels(df.index)
+    cl  = _cl(df, colors)
+    x   = np.arange(len(lbl))
+    bot = np.zeros(len(lbl))
+    info = []
+    for i, col in enumerate(df.columns):
+        v = df[col].values.astype(float)
+        ax.bar(x, v, 0.6, bottom=bot, color=cl[i], label=col)
+        info.append((v, bot.copy()))
+        bot += v
+    for v, b in info:
+        for xi, (vi, bi) in enumerate(zip(v, b)):
+            if vi > 2.5:
+                ax.text(xi, bi + vi/2,
+                        f"{vi:.2f}%" if percent else _fmt_num(vi),
+                        ha="center", va="center",
+                        fontsize=6.5, color="white", fontweight="bold", clip_on=True)
+    ax.set_xticks(x)
+    ax.set_xticklabels(lbl, rotation=45, ha="right", fontsize=8)
+    ax.set_title(title, fontsize=10, fontweight="bold", pad=6)
+    ax.set_xlabel("Month", fontsize=8)
+    ax.set_ylabel(ylabel, fontsize=8)
+    if percent:
+        ax.set_ylim(0, 110)
+        ax.yaxis.set_major_formatter(mticker.PercentFormatter())
+    else:
+        ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt_num(v)))
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.30),
+              ncol=min(len(df.columns), 4), frameon=False, fontsize=7.5)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    return ax
+
+# =============================================================================
 # LINE CHART
-# ─────────────────────────────────────────────────────────────
+# =============================================================================
 def plot_line(df_plot, title, ylabel, colors=None, percent=True, ax=None):
     if ax is None:
         _, ax = plt.subplots(figsize=(14, 7))
-
-    df = df_plot.copy().fillna(0)
-    labels = _month_labels(df.index)
-    cl = _color_list(df, colors)
-    x = np.arange(len(labels))
-
+    df  = df_plot.copy().fillna(0)
+    lbl = _month_labels(df.index)
+    cl  = _cl(df, colors)
+    x   = np.arange(len(lbl))
+    handles = []
     for i, col in enumerate(df.columns):
-        vals = df[col].values.astype(float)
-        ax.plot(x, vals, marker='o', color=cl[i], linewidth=1.8,
-                markersize=5, label=col)
-        for xi, v in enumerate(vals):
-            txt = f"{v:.2f}%" if percent else _fmt_num(v)
-            ax.annotate(txt, (xi, v),
-                        textcoords="offset points", xytext=(0, 6),
-                        ha='center', fontsize=6.5, color=cl[i])
-
+        v = df[col].values.astype(float)
+        line, = ax.plot(x, v, marker="o", color=cl[i], linewidth=1.8,
+                        markersize=5, label=col)
+        handles.append(line)
+        for xi, vi in enumerate(v):
+            ax.annotate(f"{vi:.2f}%" if percent else _fmt_num(vi),
+                        (xi, vi), textcoords="offset points", xytext=(0, 7),
+                        ha="center", fontsize=6, color=cl[i])
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
-    ax.set_title(title, fontsize=10, fontweight='bold', pad=6)
+    ax.set_xticklabels(lbl, rotation=45, ha="right", fontsize=8)
+    ax.set_title(title, fontsize=10, fontweight="bold", pad=6)
     ax.set_xlabel("Month", fontsize=8)
     ax.set_ylabel(ylabel, fontsize=8)
     ax.margins(x=0.05)
-
     if percent:
         ax.yaxis.set_major_formatter(mticker.PercentFormatter())
-
-    ax.legend(loc='upper center', bbox_to_anchor=(0.5, -0.28),
-              ncol=min(len(df.columns), 5), frameon=False, fontsize=8)
-    ax.spines['top'].set_visible(False)
-    ax.spines['right'].set_visible(False)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    # Store for external legend placement
+    ax._legend_handles = handles
+    ax._legend_labels  = [str(col) for col in df.columns]
+    # Default legend inside axes (used by all pages EXCEPT Page 13)
+    ax.legend(handles, ax._legend_labels,
+              loc="upper center", bbox_to_anchor=(0.5, -0.30),
+              ncol=min(len(df.columns), 4), frameon=False, fontsize=7.5)
     return ax
 
-
-# ─────────────────────────────────────────────────────────────
-# STACKED BAR  +  OVERLAY LINE  (page-1 style with decline rate)
-# ─────────────────────────────────────────────────────────────
+# =============================================================================
+# DUAL-AXIS: STACKED BAR + LINE
+# =============================================================================
 def plot_stacked_bar_with_line(df_bar, series_line, title, ylabel,
-                               colors=None, line_color='red',
-                               line_label='Decline Rate %', ax=None):
-    """
-    df_bar       – wide DataFrame with stacked bar columns (e.g. Approved, Declined)
-    series_line  – Series aligned to df_bar.index (e.g. overall decline-rate %)
-    """
+                               colors=None, line_color=RED,
+                               line_label="Overall Decline Rate %", ax=None):
     if ax is None:
         _, ax = plt.subplots(figsize=(14, 7))
-
-    df = df_bar.copy().fillna(0)
-    labels = _month_labels(df.index)
-    cl = _color_list(df, colors)
-
-    x = np.arange(len(labels))
-    width = 0.55
-    bottoms = np.zeros(len(labels))
-
+    df  = df_bar.copy().fillna(0)
+    lbl = _month_labels(df.index)
+    cl  = _cl(df, colors)
+    x   = np.arange(len(lbl))
+    bot = np.zeros(len(lbl))
     for i, col in enumerate(df.columns):
-        vals = df[col].values.astype(float)
-        ax.bar(x, vals, width, bottom=bottoms, color=cl[i], label=col)
-        bottoms += vals
-
+        v = df[col].values.astype(float)
+        ax.bar(x, v, 0.6, bottom=bot, color=cl[i], label=col)
+        for xi,(vi,bi) in enumerate(zip(v, bot)):
+            if vi > 2.5:
+                ax.text(xi, bi + vi/2,_fmt_num(vi), ha="center", va="center",
+                        fontsize=6.5, color="white", fontweight="bold", clip_on=True)
+        bot += v
     ax.set_xlabel("Month", fontsize=8)
     ax.set_ylabel(ylabel, fontsize=8)
     ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=45, ha='right', fontsize=8)
-    ax.yaxis.set_major_formatter(mticker.FuncFormatter(
-        lambda v, _: _fmt_num(v)))
-
-    # secondary axis for line
+    ax.set_xticklabels(lbl, rotation=45, ha="right", fontsize=8)
+    ax.yaxis.set_major_formatter(mticker.FuncFormatter(lambda v, _: _fmt_num(v)))
     ax2 = ax.twinx()
-    line_vals = series_line.reindex(df_bar.index).fillna(0).values.astype(float)
-    ax2.plot(x, line_vals, color=line_color, marker='o',
-             linewidth=2, markersize=5, label=line_label)
-    for xi, v in enumerate(line_vals):
-        ax2.annotate(f"{v:.2f}%", (xi, v),
-                     textcoords="offset points", xytext=(0, 6),
-                     ha='center', fontsize=6.5, color=line_color)
-    ax2.set_ylabel("Decline Rate %", fontsize=8, color=line_color)
+    lv  = series_line.reindex(df_bar.index).fillna(0).values.astype(float)
+    ax2.plot(x, lv, color=line_color, marker="o", linewidth=2, markersize=5, label=line_label)
+    for xi, vi in enumerate(lv):
+        ax2.annotate(f"{vi:.2f}%", (xi, vi), textcoords="offset points",
+                     xytext=(0, 7), ha="center", fontsize=6.5, color=line_color)
+    ax2.set_ylabel("Overall Decline Rate %", fontsize=8, color=line_color)
     ax2.yaxis.set_major_formatter(mticker.PercentFormatter())
-    ax2.spines['top'].set_visible(False)
-
-    # combined legend
-    handles1, labels1 = ax.get_legend_handles_labels()
-    handles2, labels2 = ax2.get_legend_handles_labels()
-    ax.legend(handles1 + handles2, labels1 + labels2,
-              loc='upper center', bbox_to_anchor=(0.5, -0.28),
-              ncol=min(len(df.columns) + 1, 6), frameon=False, fontsize=8)
-    ax.set_title(title, fontsize=10, fontweight='bold', pad=6)
-    ax.spines['top'].set_visible(False)
+    ax2.spines["top"].set_visible(False)
+    h1, l1 = ax.get_legend_handles_labels()
+    h2, l2 = ax2.get_legend_handles_labels()
+    ax.legend(h1+h2, l1+l2, loc="upper center", bbox_to_anchor=(0.5, -0.28),
+              ncol=min(len(df.columns)+1, 5), frameon=False, fontsize=7.5)
+    ax.set_title(title, fontsize=10, fontweight="bold", pad=6)
+    ax.spines["top"].set_visible(False)
     return ax
 
-
-# ─────────────────────────────────────────────────────────────
-# DUAL-AXIS BAR + LINE  (convenience alias kept for compat)
-# ─────────────────────────────────────────────────────────────
-def plot_dual_axis_bar_line(df_bar, series_line, title, ylabel,
-                            colors=None, ax=None):
+def plot_dual_axis_bar_line(df_bar, series_line, title, ylabel, colors=None, ax=None):
     return plot_stacked_bar_with_line(df_bar, series_line, title, ylabel,
                                       colors=colors, ax=ax)
-
-
-# ─────────────────────────────────────────────────────────────
-# TABLE
-# ─────────────────────────────────────────────────────────────
-def plot_table(df_plot, title, percent=False, ax=None):
-    if ax is None:
-        _, ax = plt.subplots(figsize=(14, 4))
-
-    ax.axis('off')
-    df = df_plot.copy().fillna(0)
-
-    # Build display frame
-    display = df.copy()
-    if percent:
-        display = display.map(lambda v: f"{v:.2f}%")
-    else:
-        display = display.map(_fmt_num)
-
-    display.insert(0, 'Month', _month_labels(df.index))
-    display = display.reset_index(drop=True)
-
-    tbl = ax.table(
-        cellText=display.values,
-        colLabels=display.columns,
-        loc='center',
-        cellLoc='center',
-    )
-    tbl.auto_set_font_size(False)
-    tbl.set_fontsize(7.5)
-    tbl.scale(1.0, 1.6)
-
-    # Header styling
-    #for j in range(len(display.columns)):
-        #cell = tbl[0, j]
-        #cell.set_facecolor('#525355')
-        #cell.set_text_props(color='white', fontweight='bold')
-
-    # Alternating row colours
-    #for i in range(1, len(display) + 1):
-       # bg = '#ffffff' if i % 2 == 0 else 'white'
-        #for j in range(len(display.columns)):
-           # tbl[i, j].set_facecolor(bg)
-
-    tbl.auto_set_column_width(list(range(len(display.columns))))
-    ax.set_title(title, fontsize=9, fontweight='bold', pad=4)
-    return ax
-
-
-# ─────────────────────────────────────────────────────────────
-# UTILITY
-# ─────────────────────────────────────────────────────────────
-def _fmt_num(v):
-    """Format a number as K or M for axis/label display."""
-    try:
-        v = float(v)
-    except (TypeError, ValueError):
-        return str(v)
-    if abs(v) >= 1_000_000:
-        return f"{v/1_000_000:.2f}M"
-    if abs(v) >= 1_000:
-        return f"{v/1_000:.1f}K"
-    return f"{v:.2f}"
